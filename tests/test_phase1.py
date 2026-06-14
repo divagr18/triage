@@ -357,7 +357,7 @@ class PhaseOneTests(unittest.TestCase):
             {
                 "number": 1,
                 "title": "fix: forward Mistral params",
-                "changelets": ["fix bug", "update model/provider behavior"],
+                "changelets": ["fix bug", "update model/provider behavior", "forward sampling params"],
                 "signals": {
                     "fileNames": ["libs/agno/models/mistral.py"],
                     "keywords": ["mistral", "params"],
@@ -372,7 +372,7 @@ class PhaseOneTests(unittest.TestCase):
             {
                 "number": 2,
                 "title": "fix: forward Cerebras params",
-                "changelets": ["fix bug", "update model/provider behavior"],
+                "changelets": ["fix bug", "update model/provider behavior", "forward sampling params"],
                 "signals": {
                     "fileNames": ["libs/agno/models/cerebras.py"],
                     "keywords": ["cerebras", "params"],
@@ -412,6 +412,82 @@ class PhaseOneTests(unittest.TestCase):
         self.assertEqual(len(clusters), 1)
         self.assertEqual(clusters[0]["bestPr"], 1)
         self.assertEqual(clusters[0]["prs"], [1, 2])
+
+    def test_build_duplicate_clusters_rejects_generic_core_overlap(self):
+        prs = [
+            {
+                "number": 1,
+                "title": "fix: cookie encryption",
+                "changelets": ["fix bug", "touch core runtime"],
+                "signals": {"fileNames": ["lib/response.js"], "keywords": ["cookie"], "smallDiff": True},
+                "flags": [],
+                "contributorTrust": {"score": 50},
+            },
+            {
+                "number": 2,
+                "title": "update eslint 9",
+                "changelets": ["modify project configuration", "touch core runtime"],
+                "signals": {"fileNames": ["eslint.config.mjs"], "keywords": ["eslint"], "smallDiff": False},
+                "flags": ["large_unrelated_refactor"],
+                "contributorTrust": {"score": 50},
+            },
+        ]
+
+        with patch("triage.get_pr_embeddings", return_value=[[1, 0], [0.9, 0.1]]):
+            clusters = triage.build_duplicate_clusters(
+                "owner/repo",
+                prs,
+                threshold=0.6,
+                model_name="test-model",
+            )
+
+        self.assertEqual(clusters, [])
+
+    def test_pair_specific_overlap_rejects_examples_and_broad_runtime_files(self):
+        left = {
+            "changelets": ["fix bug", "update examples or cookbook", "touch lib/response.js"],
+            "signals": {"fileNames": ["examples/auth/index.js", "lib/response.js"], "keywords": ["fix"]},
+        }
+        right = {
+            "changelets": ["modify project configuration", "update examples or cookbook", "touch lib/response.js"],
+            "signals": {"fileNames": ["examples/auth/index.js", "lib/response.js"], "keywords": ["fix"]},
+        }
+
+        self.assertFalse(
+            triage.pair_has_specific_overlap(
+                left,
+                right,
+                {"embedding": 0.9, "changelet": 0.5, "files": 0.5, "keywords": 1.0, "issues": 0.0},
+            )
+        )
+
+    def test_rest_unknown_history_does_not_penalize_as_zero_history(self):
+        pr = {
+            "title": "Improve docs",
+            "body": "Adds detailed setup guidance for local development and validation workflows.",
+            "additions": 20,
+            "deletions": 2,
+            "changedFiles": 1,
+            "checks": [],
+            "reviews": [],
+            "files": [{"filename": "docs/setup.md", "patch": "@@\n+more detail"}],
+            "contributor": {
+                "accountAssociation": "NONE",
+                "priorMergedPrs": 0,
+                "priorClosedUnmergedPrs": 0,
+                "repoCommitContributions": 0,
+                "historySource": "rest_contributors",
+                "currentOpenPrs": 1,
+                "currentOpenPrsInScan": 1,
+            },
+        }
+        pr["signals"] = triage.compute_pr_signals(pr)
+        pr["flags"] = triage.compute_pr_flags(pr)
+
+        trust = triage.compute_contributor_trust(pr)
+
+        self.assertGreaterEqual(trust["score"], 40)
+        self.assertIn("prior merged PR history unknown in REST scan", trust["risks"])
 
     def test_contributor_trust_penalizes_risky_low_context_change(self):
         pr = {

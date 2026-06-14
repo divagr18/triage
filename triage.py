@@ -180,7 +180,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     clusters = subcommands.add_parser("clusters", help="show duplicate/similar PR clusters from cache")
     clusters.add_argument("repo", help="repository in owner/repo form")
-    clusters.add_argument("--threshold", type=float, default=0.48)
+    clusters.add_argument("--threshold", type=float, default=0.62)
     clusters.add_argument("--limit", type=positive_int, default=20)
     clusters.add_argument("--model", default=DEFAULT_EMBEDDING_MODEL)
     clusters.add_argument("--refresh-embeddings", action="store_true")
@@ -897,7 +897,7 @@ def build_duplicate_clusters(
     for left in range(len(real_prs)):
         for right in range(left + 1, len(real_prs)):
             score, components = hybrid_similarity(real_prs[left], real_prs[right], embeddings[left], embeddings[right])
-            if score >= threshold:
+            if score >= threshold and pair_has_specific_overlap(real_prs[left], real_prs[right], components):
                 edges[left].append((right, score, components))
                 edges[right].append((left, score, components))
 
@@ -1059,6 +1059,70 @@ def hybrid_similarity(
     return round(score, 3), components
 
 
+GENERIC_CLUSTER_CHANGELETS = {
+    "add or update tests",
+    "touch core runtime",
+    "fix bug",
+    "add feature",
+    "modify project configuration",
+    "modify dependency metadata",
+    "improve error handling",
+    "change async or streaming flow",
+    "change database or persistence behavior",
+    "update examples or cookbook",
+    "touch examples",
+    "touch lib/application.js",
+    "touch lib/response.js",
+}
+
+BROAD_CLUSTER_FILES = {
+    "history.md",
+    "package.json",
+    "lib/application.js",
+    "lib/response.js",
+}
+
+
+def pair_has_specific_overlap(left: dict[str, Any], right: dict[str, Any], components: dict[str, float]) -> bool:
+    if components.get("issues", 0) > 0:
+        return True
+    if shared_specific_files(left, right):
+        return True
+    if shared_specific_changelets(left, right):
+        return True
+    return False
+
+
+def shared_specific_changelets(left: dict[str, Any], right: dict[str, Any]) -> set[str]:
+    left_changelets = {changelet for changelet in left.get("changelets") or [] if changelet not in GENERIC_CLUSTER_CHANGELETS}
+    right_changelets = {changelet for changelet in right.get("changelets") or [] if changelet not in GENERIC_CLUSTER_CHANGELETS}
+    return left_changelets & right_changelets
+
+
+def shared_specific_files(left: dict[str, Any], right: dict[str, Any]) -> set[str]:
+    left_files = {file for file in (left.get("signals") or {}).get("fileNames") or [] if is_specific_cluster_file(file)}
+    right_files = {file for file in (right.get("signals") or {}).get("fileNames") or [] if is_specific_cluster_file(file)}
+    return left_files & right_files
+
+
+def is_specific_cluster_file(filename: str) -> bool:
+    normalized = normalize_path(filename)
+    if not normalized:
+        return False
+    name = Path(normalized).name
+    if name in DEPENDENCY_FILES or name in LOCKFILE_NAMES:
+        return False
+    if normalized in {"package.json", "readme.md", "history.md", "changelog.md"}:
+        return False
+    if normalized in BROAD_CLUSTER_FILES:
+        return False
+    if normalized.startswith(".github/"):
+        return False
+    if normalized.startswith("examples/"):
+        return False
+    return True
+
+
 def cosine_similarity(left: list[float], right: list[float]) -> float:
     if not left or not right or len(left) != len(right):
         return 0.0
@@ -1104,6 +1168,8 @@ def label_cluster(prs: list[dict[str, Any]]) -> str:
     counts: dict[str, int] = {}
     for pr in prs:
         for changelet in pr.get("changelets") or []:
+            if changelet in GENERIC_CLUSTER_CHANGELETS:
+                continue
             counts[changelet] = counts.get(changelet, 0) + 1
     if counts:
         return max(counts.items(), key=lambda item: (item[1], item[0]))[0]
@@ -1348,6 +1414,7 @@ def compute_contributor_trust(pr: dict[str, Any]) -> dict[str, Any]:
     current_open = int_or_zero(contributor.get("currentOpenPrs"))
     open_in_scan = int_or_zero(contributor.get("currentOpenPrsInScan"))
     repo_commit_contributions = int_or_zero(contributor.get("repoCommitContributions"))
+    history_source = contributor.get("historySource")
 
     if association in {"OWNER", "MEMBER", "COLLABORATOR"}:
         score += 25
@@ -1375,6 +1442,8 @@ def compute_contributor_trust(pr: dict[str, Any]) -> dict[str, Any]:
         elif repo_commit_contributions >= 10:
             score += 6
             positives.append(f"{repo_commit_contributions} repo commit contributions")
+        elif history_source == "rest_contributors":
+            risks.append("prior merged PR history unknown in REST scan")
         else:
             score -= 10
             risks.append("no prior merged PRs found in repo")

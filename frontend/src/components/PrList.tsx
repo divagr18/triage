@@ -34,6 +34,14 @@ export function PrList({ prs, selected, onSelect, floodPrNumbers, ai, pageMode =
     if (filter === 'needs-review') result = result.filter((pr) => pr.signals.reviewState === 'none')
     if (filter === 'trusted-clean') result = result.filter(isTrustedCleanPr)
     if (filter === 'ai-flood') result = result.filter((pr) => floodPrNumbers.has(pr.number))
+    if (filter === 'ai-mismatch') {
+      result = result.filter(
+        (pr) =>
+          pr.flags.some((flag) => flag.includes('patch_text') || flag.startsWith('claim_')) ||
+          pr.alignment?.verdict === 'mismatch' ||
+          pr.alignment?.estimatedVerdict === 'mismatch',
+      )
+    }
     return sortPrs(result, sort)
   }, [prs, query, sort, filter, floodPrNumbers])
 
@@ -77,6 +85,7 @@ export function PrList({ prs, selected, onSelect, floodPrNumbers, ai, pageMode =
               <option value="needs-review">Needs review</option>
               <option value="trusted-clean">Trusted clean</option>
               <option value="ai-flood">AI flood</option>
+              <option value="ai-mismatch">AI mismatch</option>
             </select>
             <select
               value={sort}
@@ -118,4 +127,4 @@ export function PrList({ prs, selected, onSelect, floodPrNumbers, ai, pageMode =
   )
 }
 
-type FilterKey = 'all' | 'flagged' | 'low-trust' | 'needs-review' | 'trusted-clean' | 'ai-flood'
+type FilterKey = 'all' | 'flagged' | 'low-trust' | 'needs-review' | 'trusted-clean' | 'ai-flood' | 'ai-mismatch'

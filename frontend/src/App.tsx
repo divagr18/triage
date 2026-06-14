@@ -117,12 +117,15 @@ export default function App() {
 
   const selectedPr = selectedPrState?.repoSlug === selectedSlug ? selectedPrState.pr : null
   const selectPr = (pr: PullRequest) => setSelectedPrState({ repoSlug: selectedSlug, pr })
-  const floodWaves = useMemo(() => (data ? buildAiFloodWaves(data.prs) : []), [data])
+  const floodWaves = useMemo(
+    () => (data ? data.analysis?.floodWaves ?? buildAiFloodWaves(data.prs) : []),
+    [data],
+  )
   const floodClusters = useMemo(
-    () => (data ? buildFloodClusters(data.prs, floodWaves) : []),
+    () => (data ? data.analysis?.clusters ?? buildFloodClusters(data.prs, floodWaves) : []),
     [data, floodWaves],
   )
-  const clusters = useMemo(() => (data ? buildPrClusters(data.prs) : []), [data])
+  const clusters = useMemo(() => (data ? data.analysis?.clusters ?? buildPrClusters(data.prs) : []), [data])
   const trends = useMemo(() => (data ? buildTrendReport(data.prs) : null), [data])
   const floodPrNumbers = useMemo(
     () => new Set(floodWaves.flatMap((wave) => wave.prs)),

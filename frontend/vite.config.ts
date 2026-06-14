@@ -53,8 +53,10 @@ const triageCachePlugin = (): Plugin => ({
             res.statusCode = 500
             return { ok: false, error: error instanceof Error ? error.message : String(error) }
           })
+          const refreshed = JSON.parse(fs.readFileSync(file, 'utf-8'))
+          refreshed.ai = readAiCache(path.join(cacheRoot, slug))
           res.setHeader('Content-Type', 'application/json')
-          res.end(JSON.stringify({ ...result, ai: readAiCache(path.join(cacheRoot, slug)) }))
+          res.end(JSON.stringify({ ...result, data: refreshed, ai: refreshed.ai }))
           return
         }
 

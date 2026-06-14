@@ -346,6 +346,44 @@ export function PrDetail({ pr, prs = [], clusters = [], ai, onRunAi, onClose }: 
                     </div>
                   </Section>
                 )}
+
+                {pr.recommendation && (
+                  <Section title="Derived recommendation">
+                    <div className="mb-3 flex flex-wrap items-center gap-2">
+                      <span className="rounded-md border border-emerald-400/20 bg-emerald-400/[0.08] px-2 py-1 text-xs font-medium text-emerald-200">
+                        {pr.recommendation.bucket.replace(/_/g, ' ')}
+                      </span>
+                      <span className="font-mono text-xs text-zinc-400">
+                        {pr.recommendation.score}/100
+                      </span>
+                      <span className="text-xs text-zinc-500">
+                        {Math.round(pr.recommendation.confidence * 100)}% confidence
+                      </span>
+                    </div>
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div>
+                        <div className="mb-2 text-xs font-medium text-zinc-300">Reasons</div>
+                        <ul className="space-y-1.5">
+                          {pr.recommendation.reasons.map((reason) => (
+                            <li key={reason} className="text-xs leading-5 text-zinc-400">
+                              {reason}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div>
+                        <div className="mb-2 text-xs font-medium text-zinc-300">Risks</div>
+                        <ul className="space-y-1.5">
+                          {pr.recommendation.risks.map((risk) => (
+                            <li key={risk} className="text-xs leading-5 text-zinc-400">
+                              {risk}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                  </Section>
+                )}
               </div>
 
               <div className="space-y-5">

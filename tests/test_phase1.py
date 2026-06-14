@@ -347,11 +347,17 @@ class PhaseOneTests(unittest.TestCase):
             "signals": {"fileNames": ["libs/agno/models/cerebras.py"], "keywords": ["cerebras", "params"]},
         }
 
-        score, components = triage.hybrid_similarity(left, right, [1.0, 0.0], [0.9, 0.1])
+        score, components = triage.hybrid_similarity(
+            left,
+            right,
+            {"titleBody": [1.0, 0.0], "changelet": [1.0, 0.0]},
+            {"titleBody": [0.9, 0.1], "changelet": [0.95, 0.05]},
+        )
 
-        self.assertGreater(score, 0.7)
+        self.assertGreater(score, 0.6)
         self.assertGreater(components["embedding"], 0.9)
-        self.assertEqual(components["changelet"], 1.0)
+        self.assertGreater(components["titleBodyEmbedding"], 0.9)
+        self.assertGreater(components["changeletEmbedding"], 0.9)
 
     def test_build_duplicate_clusters_selects_canonical_candidate(self):
         prs = [
@@ -402,7 +408,14 @@ class PhaseOneTests(unittest.TestCase):
             },
         ]
 
-        with patch("triage.get_pr_embeddings", return_value=[[1, 0], [0.95, 0.05], [0, 1]]):
+        with patch(
+            "triage.get_pr_embedding_sets",
+            return_value=[
+                {"titleBody": [1, 0], "changelet": [1, 0]},
+                {"titleBody": [0.95, 0.05], "changelet": [0.95, 0.05]},
+                {"titleBody": [0, 1], "changelet": [0, 1]},
+            ],
+        ):
             clusters = triage.build_duplicate_clusters(
                 "owner/repo",
                 prs,
@@ -434,7 +447,13 @@ class PhaseOneTests(unittest.TestCase):
             },
         ]
 
-        with patch("triage.get_pr_embeddings", return_value=[[1, 0], [0.9, 0.1]]):
+        with patch(
+            "triage.get_pr_embedding_sets",
+            return_value=[
+                {"titleBody": [1, 0], "changelet": [1, 0]},
+                {"titleBody": [0.9, 0.1], "changelet": [0.9, 0.1]},
+            ],
+        ):
             clusters = triage.build_duplicate_clusters(
                 "owner/repo",
                 prs,
@@ -686,7 +705,7 @@ class PhaseOneTests(unittest.TestCase):
                         "questionsForMaintainer": [],
                         "confidence": 0.82,
                     },
-                ) as codex:
+                ) as codex, patch("triage.refresh_analysis_cache"):
                     triage.explain_command(args)
                     triage.explain_command(args)
 
@@ -730,7 +749,7 @@ class PhaseOneTests(unittest.TestCase):
                         "evidence": ["README.md changed"],
                         "confidence": 0.88,
                     },
-                ) as responses:
+                ) as responses, patch("triage.refresh_analysis_cache"):
                     triage.align_command(args)
                     triage.align_command(args)
 
@@ -782,7 +801,7 @@ class PhaseOneTests(unittest.TestCase):
                         ],
                         "summary": "One risky PR.",
                     },
-                ) as codex:
+                ) as codex, patch("triage.refresh_analysis_cache"):
                     triage.recommend_command(args)
 
                 sent_prs = codex.call_args.args[1]
@@ -836,11 +855,133 @@ class PhaseOneTests(unittest.TestCase):
                         "suggestedAction": "Review #3 first.",
                         "confidence": 0.84,
                     },
-                ) as codex:
+                ) as codex, patch("triage.refresh_analysis_cache"):
                     triage.compare_command(args)
                     triage.compare_command(args)
 
                 self.assertEqual(codex.call_count, 1)
+
+    def test_patch_keyword_extraction_finds_symbols_config_and_errors(self):
+        pr = {
+            "files": [
+                {
+                    "filename": "src/auth.py",
+                    "patch": "@@\n+def validate_token(scope):\n+    raise PermissionError('TOKEN_EXPIRED')",
+                },
+                {"filename": "package.json", "patch": '@@\n+    "fast-dep": "^1.0.0"'},
+            ]
+        }
+
+        keywords = triage.extract_patch_keywords(pr)
+
+        self.assertIn("validate_token", keywords)
+        self.assertIn("token_expired", keywords)
+        self.assertIn("package.json", keywords)
+
+    def test_canonical_recommendation_returns_bucket_and_breakdown(self):
+        pr = {
+            "number": 1,
+            "title": "fix: parser crash",
+            "body": "Fixes parser crash with a focused null guard and includes tests.",
+            "additions": 12,
+            "deletions": 2,
+            "changedFiles": 2,
+            "files": [
+                {"filename": "src/parser.py", "patch": "@@\n+if value is None:\n+    return None"},
+                {"filename": "tests/test_parser.py", "patch": "@@\n+def test_null_guard(): pass"},
+            ],
+            "contributorTrust": {"score": 75},
+            "flags": [],
+            "changelets": ["add null guard", "add or update tests"],
+        }
+        pr["signals"] = triage.compute_pr_signals(pr)
+
+        recommendation = triage.canonical_recommendation(pr)
+
+        self.assertIn(recommendation["bucket"], {"review_first", "risky_but_maybe_valuable"})
+        self.assertIn("scoreBreakdown", recommendation)
+        self.assertIn("tests_present", recommendation["scoreBreakdown"])
+
+    def test_derive_analysis_persists_clusters_flood_and_review_queue(self):
+        prs = []
+        for number, hour in [(1, "00"), (2, "03"), (3, "20")]:
+            pr = {
+                "number": number,
+                "title": "fix: forward sampling params",
+                "body": "Forwards sampling params through provider runtime.",
+                "createdAt": f"2026-06-01T{hour}:00:00Z",
+                "additions": 10,
+                "deletions": 1,
+                "changedFiles": 1,
+                "files": [{"filename": f"src/provider_{number}.py", "patch": "@@\n+temperature = request.temperature"}],
+                "contributor": {"accountAssociation": "FIRST_TIMER", "priorMergedPrs": 0, "currentOpenPrs": 1},
+                "contributorTrust": {"score": 42},
+            }
+            pr["signals"] = triage.compute_pr_signals(pr)
+            pr["flags"] = triage.compute_pr_flags(pr)
+            pr["changelets"] = ["forward sampling params"]
+            pr["contributorTrust"] = triage.compute_contributor_trust(pr)
+            prs.append(pr)
+        data = {"repo": "owner/repo", "prs": prs}
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(triage, "CACHE_ROOT", Path(directory)), patch(
+                "triage.get_pr_embedding_sets",
+                return_value=[
+                    {"titleBody": [1, 0], "changelet": [1, 0]},
+                    {"titleBody": [0.98, 0.02], "changelet": [0.98, 0.02]},
+                    {"titleBody": [0.97, 0.03], "changelet": [0.97, 0.03]},
+                ],
+            ):
+                analysis = triage.derive_analysis(
+                    "owner/repo",
+                    data,
+                    threshold=0.6,
+                    flood_threshold=0.55,
+                    flood_window_hours=24,
+                    flood_min_size=3,
+                    model_name="test-model",
+                    refresh_embeddings=False,
+                )
+
+        self.assertEqual(data["schemaVersion"], 5)
+        self.assertTrue(analysis["clusters"])
+        self.assertTrue(analysis["reviewQueue"])
+        self.assertIn("recommendation", data["prs"][0])
+
+    def test_alignment_mismatch_increases_flood_score(self):
+        prs = []
+        for number in [1, 2, 3]:
+            pr = {
+                "number": number,
+                "title": "fix: auth timeout",
+                "body": "Fixes auth timeout.",
+                "createdAt": f"2026-06-01T0{number}:00:00Z",
+                "files": [{"filename": "src/auth.py", "patch": "@@\n+# docs only-ish comment"}],
+                "contributorTrust": {"score": 40},
+                "changelets": ["fix auth timeout"],
+            }
+            pr["signals"] = {
+                "isNewContributor": True,
+                "docsOnly": False,
+                "smallDiff": True,
+                "reviewState": "none",
+                "hasTests": False,
+                "ciState": "none",
+                "genericDescription": False,
+                "descriptionLength": 120,
+                "fileNames": ["src/auth.py"],
+            }
+            pr["flags"] = []
+            prs.append(pr)
+        plain = triage.score_flood_wave("fix auth timeout", "repeated_signal", prs)
+        status = {
+            str(pr["number"]): {"alignment": {"verdict": "mismatch", "score": 0.2}}
+            for pr in prs
+        }
+        mismatched = triage.score_flood_wave("fix auth timeout", "repeated_signal", prs, ai_status=status)
+
+        self.assertGreater(mismatched["score"], plain["score"])
 
 
 if __name__ == "__main__":

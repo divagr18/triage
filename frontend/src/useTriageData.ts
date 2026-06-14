@@ -67,7 +67,11 @@ export function useRepoData(slug: string | null) {
       if (!response.ok || result.error) {
         throw new Error(result.error || `HTTP ${response.status}`)
       }
-      setData((current) => (current ? { ...current, ai: result.ai as AiCache } : current))
+      if (result.data) {
+        setData(result.data as TriageCache)
+      } else {
+        setData((current) => (current ? { ...current, ai: result.ai as AiCache } : current))
+      }
       return result
     },
     [slug],

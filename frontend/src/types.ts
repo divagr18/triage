@@ -73,6 +73,7 @@ export interface Signals {
   touchedModules: string[]
   fileNames: string[]
   keywords: string[]
+  patchKeywords?: string[]
   hasTests: boolean
   hasCode: boolean
   docsOnly: boolean
@@ -127,6 +128,26 @@ export interface PullRequest {
   flags: string[]
   changelets?: string[]
   contributorTrust: ContributorTrust
+  recommendation?: Recommendation
+  alignment?: PrAlignmentSummary
+}
+
+export interface Recommendation {
+  bucket: 'review_first' | 'safe_close_duplicate' | 'needs_human' | 'probably_junk' | 'risky_but_maybe_valuable' | string
+  score: number
+  confidence: number
+  reasons: string[]
+  risks: string[]
+  scoreBreakdown: Record<string, number>
+}
+
+export interface PrAlignmentSummary {
+  cached: boolean
+  verdict?: string | null
+  score?: number | null
+  estimatedScore?: number
+  estimatedVerdict?: string
+  signals?: string[]
 }
 
 export interface SignalSummary {
@@ -149,7 +170,43 @@ export interface TriageCache {
   source: string
   prs: PullRequest[]
   signalSummary: SignalSummary
+  analysis?: Analysis
   ai?: AiCache
+}
+
+export interface Analysis {
+  clusters: PrCluster[]
+  floodWaves: FloodWave[]
+  reviewQueue: ReviewQueueItem[]
+  aiStatus: Record<string, AiStatus>
+  generatedAt: string
+  analysisVersion: string
+}
+
+export interface ReviewQueueItem {
+  pr: number
+  title: string
+  bucket: string
+  score: number
+  confidence: number
+  reasons: string[]
+  risks: string[]
+}
+
+export interface AiStatus {
+  hasAlignment: boolean
+  hasExplain: boolean
+  hasCompare: boolean
+  alignment?: {
+    verdict?: string
+    score?: number
+    confidence?: number
+    cachedAt?: string
+    provider?: string
+    mismatches?: string[]
+  } | null
+  explain?: { cachedAt?: string; provider?: string } | null
+  compare?: Array<{ cachedAt?: string; provider?: string }>
 }
 
 export interface AiCache {
@@ -223,12 +280,29 @@ export interface FloodWave {
   id: string
   label: string
   prs: number[]
+  members?: FloodMember[]
   score: number
   window: string
+  source?: string
   bestPr: number
   bestTitle: string
+  bestReason?: string
+  originPr?: number | null
+  originReason?: string | null
   reasons: string[]
   recommendedAction: string
+}
+
+export interface FloodMember {
+  number: number
+  title: string
+  author: string
+  trustScore: number
+  flags: string[]
+  alignmentVerdict?: string | null
+  alignmentScore?: number | null
+  bucket?: string
+  canonicalScore?: number
 }
 
 export interface PrCluster {
@@ -238,7 +312,22 @@ export interface PrCluster {
   size: number
   bestPr: number
   bestTitle: string
+  bestScore?: number
   reasons: string[]
+  members?: ClusterMember[]
+  recommendation?: Recommendation
+}
+
+export interface ClusterMember {
+  number: number
+  title: string
+  canonicalScore: number
+  bucket: string
+  trustScore?: number
+  flags: string[]
+  changelets: string[]
+  similarityToBest?: number
+  recommendation?: Recommendation
 }
 
 export interface TrendItem {

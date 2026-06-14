@@ -54,9 +54,19 @@ export function PrCard({ pr, selected, aiAlignment, aiExplain, onClick }: Props)
                 align {Math.round(aiAlignment.alignmentScore * 100)}
               </span>
             )}
+            {!aiAlignment && pr.alignment?.estimatedVerdict && (
+              <span className="rounded-md border border-zinc-700 bg-zinc-900/60 px-2 py-0.5 text-xs text-zinc-300">
+                est {pr.alignment.estimatedVerdict}
+              </span>
+            )}
             {aiExplain && (
               <span className="rounded-md border border-violet-400/20 bg-violet-400/[0.08] px-2 py-0.5 text-xs text-violet-200">
                 Codex
+              </span>
+            )}
+            {pr.recommendation && (
+              <span className="rounded-md border border-emerald-400/20 bg-emerald-400/[0.08] px-2 py-0.5 text-xs text-emerald-200">
+                {pr.recommendation.bucket.replace(/_/g, ' ')}
               </span>
             )}
           </div>

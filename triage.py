@@ -28,7 +28,8 @@ from typing import Any
 
 
 CACHE_ROOT = Path(".triage") / "cache"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+ANALYSIS_VERSION = "phase-7-v1"
 DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_REASONING_MODEL = "gpt-5.4"
 DEFAULT_CODEX_MODEL = "gpt-5.4"
@@ -282,6 +283,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "scan":
             scan_command(args)
+        elif args.command == "derive":
+            derive_command(args)
         elif args.command == "report":
             report_command(args)
         elif args.command == "changelets":
@@ -298,6 +301,8 @@ def main(argv: list[str] | None = None) -> int:
             compare_command(args)
         elif args.command == "recommend":
             recommend_command(args)
+        elif args.command == "enrich":
+            enrich_command(args)
         elif args.command == "cache-path":
             print(cache_path_for_repo(args.repo))
         else:
@@ -335,6 +340,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=50,
         help="GraphQL mode only: max prior PRs to inspect per contributor via GitHub Search",
     )
+    scan.add_argument("--no-derive", action="store_true", help="skip local derived analysis after scan")
+
+    derive = subcommands.add_parser("derive", help="persist clusters, flood waves, and canonical ranking into cache")
+    derive.add_argument("repo", help="repository in owner/repo form")
+    derive.add_argument("--refresh-analysis", action="store_true")
+    derive.add_argument("--threshold", type=float, default=0.62)
+    derive.add_argument("--flood-threshold", type=float, default=0.72)
+    derive.add_argument("--flood-window-hours", type=positive_int, default=48)
+    derive.add_argument("--flood-min-size", type=positive_int, default=3)
+    derive.add_argument("--model", default=DEFAULT_EMBEDDING_MODEL)
+    derive.add_argument("--refresh-embeddings", action="store_true")
 
     report = subcommands.add_parser("report", help="show deterministic signal summary from cache")
     report.add_argument("repo", help="repository in owner/repo form")
@@ -349,6 +365,7 @@ def build_parser() -> argparse.ArgumentParser:
     clusters.add_argument("--limit", type=positive_int, default=20)
     clusters.add_argument("--model", default=DEFAULT_EMBEDDING_MODEL)
     clusters.add_argument("--refresh-embeddings", action="store_true")
+    clusters.add_argument("--refresh-analysis", action="store_true")
 
     flood = subcommands.add_parser("flood", help="detect likely AI-flood PR waves from cache")
     flood.add_argument("repo", help="repository in owner/repo form")
@@ -360,6 +377,7 @@ def build_parser() -> argparse.ArgumentParser:
     flood.add_argument("--limit", type=positive_int, default=20)
     flood.add_argument("--model", default=DEFAULT_EMBEDDING_MODEL)
     flood.add_argument("--refresh-embeddings", action="store_true")
+    flood.add_argument("--refresh-analysis", action="store_true")
 
     align = subcommands.add_parser("align", help="judge patch-text alignment for a PR via Responses API")
     align.add_argument("repo", help="repository in owner/repo form")
@@ -385,6 +403,17 @@ def build_parser() -> argparse.ArgumentParser:
     recommend.add_argument("--limit", type=positive_int, default=5)
     recommend.add_argument("--model", default=DEFAULT_CODEX_MODEL)
     recommend.add_argument("--refresh-ai", action="store_true")
+
+    enrich = subcommands.add_parser("enrich", help="run cached AI enrichment for selected PRs")
+    enrich.add_argument("repo", help="repository in owner/repo form")
+    enrich.add_argument("--align", action="store_true", help="run patch-text alignment")
+    enrich.add_argument("--explain", action="store_true", help="run Codex explain")
+    enrich.add_argument("--recommend", action="store_true", help="run Codex recommendations")
+    enrich.add_argument("--prs", help="comma-separated PR numbers for alignment/explain")
+    enrich.add_argument("--limit", type=positive_int, default=10)
+    enrich.add_argument("--model", default=DEFAULT_CODEX_MODEL)
+    enrich.add_argument("--alignment-model", default=DEFAULT_REASONING_MODEL)
+    enrich.add_argument("--refresh-ai", action="store_true")
 
     cache_path = subcommands.add_parser("cache-path", help="print cache file path for a repo")
     cache_path.add_argument("repo", help="repository in owner/repo form")
@@ -415,20 +444,80 @@ def scan_command(args: argparse.Namespace) -> None:
     if scan_args.offline:
         data = read_cache(path)
         attach_deterministic_signals(data)
+        if not args.no_derive:
+            derive_analysis(
+                scan_args.repo,
+                data,
+                threshold=0.62,
+                flood_threshold=0.72,
+                flood_window_hours=48,
+                flood_min_size=3,
+                model_name=DEFAULT_EMBEDDING_MODEL,
+                refresh_embeddings=False,
+            )
         print_scan_summary(data, offline=True)
         return
 
     if path.exists() and not scan_args.refresh:
         data = read_cache(path)
         attach_deterministic_signals(data)
+        if not args.no_derive:
+            derive_analysis(
+                scan_args.repo,
+                data,
+                threshold=0.62,
+                flood_threshold=0.72,
+                flood_window_hours=48,
+                flood_min_size=3,
+                model_name=DEFAULT_EMBEDDING_MODEL,
+                refresh_embeddings=False,
+            )
+            write_cache(path, data)
         print(f"Using cached scan at {path}. Pass --refresh to call GitHub.")
         print_scan_summary(data, offline=True)
         return
 
     require_gh()
     data = scan_github(scan_args)
+    if not args.no_derive:
+        derive_analysis(
+            scan_args.repo,
+            data,
+            threshold=0.62,
+            flood_threshold=0.72,
+            flood_window_hours=48,
+            flood_min_size=3,
+            model_name=DEFAULT_EMBEDDING_MODEL,
+            refresh_embeddings=False,
+        )
     write_cache(path, data)
     print_scan_summary(data, offline=False)
+    print(f"Cache: {path}")
+
+
+def derive_command(args: argparse.Namespace) -> None:
+    validate_repo(args.repo)
+    path = cache_path_for_repo(args.repo)
+    data = read_cache(path)
+    attach_deterministic_signals(data)
+    derive_analysis(
+        args.repo,
+        data,
+        threshold=args.threshold,
+        flood_threshold=args.flood_threshold,
+        flood_window_hours=args.flood_window_hours,
+        flood_min_size=args.flood_min_size,
+        model_name=args.model,
+        refresh_embeddings=args.refresh_embeddings,
+    )
+    write_cache(path, data)
+    analysis = data.get("analysis") or {}
+    print("Derived analysis")
+    print("----------------")
+    print(f"Repo: {args.repo}")
+    print(f"Clusters: {len(analysis.get('clusters') or [])}")
+    print(f"AI flood waves: {len(analysis.get('floodWaves') or [])}")
+    print(f"Review queue: {len(analysis.get('reviewQueue') or [])}")
     print(f"Cache: {path}")
 
 
@@ -436,6 +525,8 @@ def report_command(args: argparse.Namespace) -> None:
     validate_repo(args.repo)
     data = read_cache(cache_path_for_repo(args.repo))
     attach_deterministic_signals(data)
+    apply_alignment_annotations(data, build_ai_status(args.repo, data.get("prs") or []))
+    data["signalSummary"] = compute_signal_summary(data.get("prs") or [])
     print_signal_report(data)
 
 
@@ -448,40 +539,49 @@ def changelets_command(args: argparse.Namespace) -> None:
 
 def clusters_command(args: argparse.Namespace) -> None:
     validate_repo(args.repo)
-    data = read_cache(cache_path_for_repo(args.repo))
+    path = cache_path_for_repo(args.repo)
+    data = read_cache(path)
     attach_deterministic_signals(data)
-    data["clusters"] = build_duplicate_clusters(
-        args.repo,
-        data.get("prs") or [],
-        threshold=args.threshold,
-        model_name=args.model,
-        refresh_embeddings=args.refresh_embeddings,
-    )
+    if args.refresh_analysis or not ((data.get("analysis") or {}).get("clusters")):
+        derive_analysis(
+            args.repo,
+            data,
+            threshold=args.threshold,
+            flood_threshold=0.72,
+            flood_window_hours=48,
+            flood_min_size=3,
+            model_name=args.model,
+            refresh_embeddings=args.refresh_embeddings,
+        )
+        write_cache(path, data)
     print_clusters(data, limit=args.limit)
 
 
 def flood_command(args: argparse.Namespace) -> None:
     validate_repo(args.repo)
-    data = read_cache(cache_path_for_repo(args.repo))
+    path = cache_path_for_repo(args.repo)
+    data = read_cache(path)
     attach_deterministic_signals(data)
-    waves = build_ai_flood_waves(
-        args.repo,
-        data.get("prs") or [],
-        since=args.since,
-        window_hours=args.window_hours,
-        min_size=args.min_size,
-        threshold=args.threshold,
-        cluster_threshold=args.cluster_threshold,
-        model_name=args.model,
-        refresh_embeddings=args.refresh_embeddings,
-    )
-    data["floodWaves"] = waves
-    print_flood_waves(data, waves, limit=args.limit)
+    if args.refresh_analysis or not ((data.get("analysis") or {}).get("floodWaves")):
+        derive_analysis(
+            args.repo,
+            data,
+            threshold=args.cluster_threshold,
+            flood_threshold=args.threshold,
+            flood_window_hours=args.window_hours,
+            flood_min_size=args.min_size,
+            model_name=args.model,
+            refresh_embeddings=args.refresh_embeddings,
+            since=args.since,
+        )
+        write_cache(path, data)
+    print_flood_waves(data, (data.get("analysis") or {}).get("floodWaves") or [], limit=args.limit)
 
 
 def align_command(args: argparse.Namespace) -> None:
     validate_repo(args.repo)
-    data = read_cache(cache_path_for_repo(args.repo))
+    path = cache_path_for_repo(args.repo)
+    data = read_cache(path)
     attach_deterministic_signals(data)
     pr = find_pr(data, args.pr)
     result = cached_ai_result(
@@ -491,12 +591,14 @@ def align_command(args: argparse.Namespace) -> None:
         refresh=args.refresh_ai,
         compute=lambda: run_patch_text_alignment(pr, model=args.model),
     )
+    refresh_analysis_cache(args.repo, data, path)
     print_json_result("Patch-Text Alignment", result)
 
 
 def explain_command(args: argparse.Namespace) -> None:
     validate_repo(args.repo)
-    data = read_cache(cache_path_for_repo(args.repo))
+    path = cache_path_for_repo(args.repo)
+    data = read_cache(path)
     attach_deterministic_signals(data)
     pr = find_pr(data, args.pr)
     result = cached_ai_result(
@@ -506,12 +608,14 @@ def explain_command(args: argparse.Namespace) -> None:
         refresh=args.refresh_ai,
         compute=lambda: run_codex_explain(args.repo, pr, model=args.model),
     )
+    refresh_analysis_cache(args.repo, data, path)
     print_json_result("Codex PR Explain", result)
 
 
 def compare_command(args: argparse.Namespace) -> None:
     validate_repo(args.repo)
-    data = read_cache(cache_path_for_repo(args.repo))
+    path = cache_path_for_repo(args.repo)
+    data = read_cache(path)
     attach_deterministic_signals(data)
     left = find_pr(data, args.left)
     right = find_pr(data, args.right)
@@ -522,12 +626,14 @@ def compare_command(args: argparse.Namespace) -> None:
         refresh=args.refresh_ai,
         compute=lambda: run_codex_compare(args.repo, left, right, model=args.model),
     )
+    refresh_analysis_cache(args.repo, data, path)
     print_json_result("Codex PR Compare", result)
 
 
 def recommend_command(args: argparse.Namespace) -> None:
     validate_repo(args.repo)
-    data = read_cache(cache_path_for_repo(args.repo))
+    path = cache_path_for_repo(args.repo)
+    data = read_cache(path)
     attach_deterministic_signals(data)
     prs = select_recommendation_candidates(data, limit=args.limit)
     if not prs:
@@ -540,7 +646,173 @@ def recommend_command(args: argparse.Namespace) -> None:
         refresh=args.refresh_ai,
         compute=lambda: run_codex_recommend(args.repo, prs, model=args.model),
     )
+    refresh_analysis_cache(args.repo, data, path)
     print_json_result("Codex Action Recommendations", result)
+
+
+def refresh_analysis_cache(repo: str, data: dict[str, Any], path: Path) -> None:
+    attach_deterministic_signals(data)
+    derive_analysis(
+        repo,
+        data,
+        threshold=0.62,
+        flood_threshold=0.72,
+        flood_window_hours=48,
+        flood_min_size=3,
+        model_name=DEFAULT_EMBEDDING_MODEL,
+        refresh_embeddings=False,
+    )
+    write_cache(path, data)
+
+
+def enrich_command(args: argparse.Namespace) -> None:
+    validate_repo(args.repo)
+    path = cache_path_for_repo(args.repo)
+    data = read_cache(path)
+    attach_deterministic_signals(data)
+    requested = args.align or args.explain or args.recommend
+    if not requested:
+        raise TriageError("choose at least one enrichment: --align, --explain, or --recommend")
+
+    selected_prs = select_prs_for_enrichment(data, prs_text=args.prs, limit=args.limit)
+    if args.align:
+        for pr in selected_prs:
+            cached_ai_result(
+                args.repo,
+                "alignment",
+                alignment_cache_key(pr, args.alignment_model),
+                refresh=args.refresh_ai,
+                compute=lambda pr=pr: run_patch_text_alignment(pr, model=args.alignment_model),
+            )
+            print(f"aligned #{pr.get('number')}")
+    if args.explain:
+        for pr in selected_prs:
+            cached_ai_result(
+                args.repo,
+                "codex_explain",
+                codex_cache_key("explain", [pr], args.model),
+                refresh=args.refresh_ai,
+                compute=lambda pr=pr: run_codex_explain(args.repo, pr, model=args.model),
+            )
+            print(f"explained #{pr.get('number')}")
+    if args.recommend:
+        candidates = select_recommendation_candidates(data, limit=args.limit)
+        if candidates:
+            cached_ai_result(
+                args.repo,
+                "codex_recommend",
+                codex_cache_key("recommend", candidates, args.model),
+                refresh=args.refresh_ai,
+                compute=lambda: run_codex_recommend(args.repo, candidates, model=args.model),
+            )
+            print(f"recommended {len(candidates)} PRs")
+
+    attach_deterministic_signals(data)
+    derive_analysis(
+        args.repo,
+        data,
+        threshold=0.62,
+        flood_threshold=0.72,
+        flood_window_hours=48,
+        flood_min_size=3,
+        model_name=DEFAULT_EMBEDDING_MODEL,
+        refresh_embeddings=False,
+    )
+    write_cache(path, data)
+
+
+def derive_analysis(
+    repo: str,
+    data: dict[str, Any],
+    *,
+    threshold: float,
+    flood_threshold: float,
+    flood_window_hours: int,
+    flood_min_size: int,
+    model_name: str,
+    refresh_embeddings: bool,
+    since: str | None = None,
+) -> dict[str, Any]:
+    data["schemaVersion"] = SCHEMA_VERSION
+    attach_deterministic_signals(data)
+    ai_status = build_ai_status(repo, data.get("prs") or [])
+    apply_alignment_annotations(data, ai_status)
+    clusters = build_duplicate_clusters(
+        repo,
+        data.get("prs") or [],
+        threshold=threshold,
+        model_name=model_name,
+        refresh_embeddings=refresh_embeddings,
+        ai_status=ai_status,
+    )
+    cluster_by_pr = build_cluster_index(clusters)
+    waves = build_ai_flood_waves(
+        repo,
+        data.get("prs") or [],
+        since=since,
+        window_hours=flood_window_hours,
+        min_size=flood_min_size,
+        threshold=flood_threshold,
+        cluster_threshold=threshold,
+        model_name=model_name,
+        refresh_embeddings=False,
+        clusters=clusters,
+        ai_status=ai_status,
+    )
+    flood_by_pr = build_flood_index(waves)
+    review_queue: list[dict[str, Any]] = []
+    for pr in [pr for pr in data.get("prs") or [] if isinstance(pr, dict)]:
+        recommendation = canonical_recommendation(
+            pr,
+            cluster=cluster_by_pr.get(int_or_zero(pr.get("number"))),
+            flood=flood_by_pr.get(int_or_zero(pr.get("number"))),
+            alignment=(ai_status.get(str(pr.get("number"))) or {}).get("alignment"),
+        )
+        pr["recommendation"] = recommendation
+        review_queue.append(
+            {
+                "pr": pr.get("number"),
+                "title": pr.get("title"),
+                "bucket": recommendation["bucket"],
+                "score": recommendation["score"],
+                "confidence": recommendation["confidence"],
+                "reasons": recommendation["reasons"],
+                "risks": recommendation["risks"],
+            }
+        )
+    annotate_cluster_recommendations(clusters, data.get("prs") or [], ai_status)
+    data["analysis"] = {
+        "clusters": clusters,
+        "floodWaves": waves,
+        "reviewQueue": sorted(review_queue, key=lambda item: (-item["score"], str(item["pr"]))),
+        "aiStatus": ai_status,
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "analysisVersion": ANALYSIS_VERSION,
+    }
+    data["signalSummary"] = compute_signal_summary(data.get("prs") or [])
+    return data["analysis"]
+
+
+def select_prs_for_enrichment(data: dict[str, Any], *, prs_text: str | None, limit: int) -> list[dict[str, Any]]:
+    if prs_text:
+        numbers = parse_pr_numbers(prs_text)
+        return [find_pr(data, number) for number in numbers]
+    prs = [pr for pr in data.get("prs") or [] if isinstance(pr, dict)]
+    return sorted(prs, key=recommendation_priority, reverse=True)[:limit]
+
+
+def parse_pr_numbers(value: str) -> list[int]:
+    numbers: list[int] = []
+    for part in value.split(","):
+        stripped = part.strip().lstrip("#")
+        if not stripped:
+            continue
+        if not stripped.isdigit():
+            raise TriageError(f"invalid PR number: {part}")
+        numbers.append(int(stripped))
+    if not numbers:
+        raise TriageError("no PR numbers provided")
+    return numbers
 
 
 def scan_github(args: ScanArgs) -> dict[str, Any]:
@@ -960,6 +1232,149 @@ def attach_deterministic_signals(data: dict[str, Any]) -> None:
     data["signalSummary"] = compute_signal_summary(prs)
 
 
+def build_ai_status(repo: str, prs: list[Any]) -> dict[str, Any]:
+    status = {
+        str(pr.get("number")): {
+            "hasAlignment": False,
+            "hasExplain": False,
+            "hasCompare": False,
+            "alignment": None,
+            "explain": None,
+            "compare": [],
+        }
+        for pr in prs
+        if isinstance(pr, dict) and pr.get("number") is not None
+    }
+    for result in read_ai_cache_files(repo, "alignment"):
+        number = result.get("pr")
+        slot = status.get(str(number))
+        if slot is not None:
+            slot["hasAlignment"] = True
+            slot["alignment"] = compact_alignment_status(result)
+    for result in read_ai_cache_files(repo, "codex_explain"):
+        number = result.get("pr")
+        slot = status.get(str(number))
+        if slot is not None:
+            slot["hasExplain"] = True
+            slot["explain"] = compact_ai_result_status(result)
+    for result in read_ai_cache_files(repo, "codex_compare"):
+        for number in [result.get("leftPr"), result.get("rightPr")]:
+            slot = status.get(str(number))
+            if slot is not None:
+                slot["hasCompare"] = True
+                slot["compare"].append(compact_ai_result_status(result))
+    return status
+
+
+def read_ai_cache_files(repo: str, kind: str) -> list[dict[str, Any]]:
+    directory = cache_path_for_repo(repo).parent / "ai" / kind
+    if not directory.exists():
+        return []
+    results: list[dict[str, Any]] = []
+    for path in sorted(directory.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            data["_cacheFile"] = path.name
+            results.append(data)
+    return sorted(results, key=lambda item: str(item.get("_cachedAt") or ""), reverse=True)
+
+
+def compact_ai_result_status(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "cachedAt": result.get("_cachedAt"),
+        "provider": result.get("_provider"),
+        "cacheFile": result.get("_cacheFile"),
+    }
+
+
+def compact_alignment_status(result: dict[str, Any]) -> dict[str, Any]:
+    status = compact_ai_result_status(result)
+    status.update(
+        {
+            "verdict": result.get("verdict"),
+            "score": result.get("alignmentScore"),
+            "confidence": result.get("confidence"),
+            "mismatches": result.get("mismatches") or [],
+        }
+    )
+    return status
+
+
+def apply_alignment_annotations(data: dict[str, Any], ai_status: dict[str, Any]) -> None:
+    for pr in [pr for pr in data.get("prs") or [] if isinstance(pr, dict)]:
+        status = ai_status.get(str(pr.get("number"))) or {}
+        cached_alignment = status.get("alignment")
+        estimate = estimate_patch_text_alignment(pr)
+        pr["alignment"] = {
+            "cached": bool(cached_alignment),
+            "verdict": (cached_alignment or {}).get("verdict"),
+            "score": (cached_alignment or {}).get("score"),
+            "estimatedScore": estimate["score"],
+            "estimatedVerdict": estimate["verdict"],
+            "signals": estimate["signals"],
+        }
+        flags = list(pr.get("flags") or [])
+        flags.extend(alignment_flags(pr, pr["alignment"]))
+        pr["flags"] = unique_strings(flags)
+
+
+def estimate_patch_text_alignment(pr: dict[str, Any]) -> dict[str, Any]:
+    title_body = f"{pr.get('title') or ''}\n{pr.get('body') or ''}".lower()
+    signals = pr.get("signals") or {}
+    changelets = " ".join(pr.get("changelets") or []).lower()
+    patch_keywords = set(extract_patch_keywords(pr))
+    claim_keywords = set(extract_keywords(title_body, limit=20))
+    score = 0.68
+    reasons: list[str] = []
+    if claim_keywords and patch_keywords:
+        overlap = len(claim_keywords & patch_keywords) / max(1, len(claim_keywords | patch_keywords))
+        score += min(0.18, overlap * 0.6)
+        if overlap < 0.08:
+            score -= 0.16
+            reasons.append("low claim-to-patch keyword overlap")
+    if re.search(r"\b(test|tests|coverage)\b", title_body) and not signals.get("hasTests"):
+        score -= 0.24
+        reasons.append("claims tests without test files")
+    if re.search(r"\b(performance|perf|speed|faster|optimi[sz]e)\b", title_body) and signals.get("formattingChurn"):
+        score -= 0.20
+        reasons.append("performance claim but patch resembles formatting churn")
+    if re.search(r"\bfix|bug|crash|error|failure\b", title_body) and signals.get("docsOnly"):
+        score -= 0.28
+        reasons.append("bug-fix claim but patch is docs-only")
+    if signals.get("genericDescription") and signals.get("coreFilesChanged"):
+        score -= 0.18
+        reasons.append("generic description touches sensitive code")
+    if changelets and any(word in title_body for word in ["fix", "add", "support", "update"]):
+        score += 0.05
+    score = max(0.0, min(1.0, round(score, 3)))
+    verdict = "aligned" if score >= 0.78 else "partial" if score >= 0.55 else "mismatch"
+    return {"score": score, "verdict": verdict, "signals": reasons}
+
+
+def alignment_flags(pr: dict[str, Any], alignment: dict[str, Any]) -> list[str]:
+    flags: list[str] = []
+    score = alignment.get("score")
+    estimated = alignment.get("estimatedScore")
+    verdict = alignment.get("verdict") or alignment.get("estimatedVerdict")
+    signals = set(alignment.get("signals") or [])
+    if score is not None and float(score) < 0.55:
+        flags.append("patch_text_mismatch")
+    elif score is None and estimated is not None and float(estimated) < 0.45:
+        flags.append("patch_text_mismatch_estimated")
+    if verdict == "mismatch":
+        flags.append("patch_text_mismatch")
+    if "claims tests without test files" in signals:
+        flags.append("claim_tests_missing")
+    if "performance claim but patch resembles formatting churn" in signals:
+        flags.append("claim_perf_but_formatting")
+    if "generic description touches sensitive code" in signals:
+        flags.append("sensitive_change_low_context")
+    return flags
+
+
 def compute_pr_signals(pr: dict[str, Any]) -> dict[str, Any]:
     files = [file for file in pr.get("files", []) if isinstance(file, dict)]
     buckets = {bucket: 0 for bucket in ["code", "tests", "docs", "config", "lockfile", "generated", "other"]}
@@ -991,6 +1406,7 @@ def compute_pr_signals(pr: dict[str, Any]) -> dict[str, Any]:
         "touchedModules": sorted(touched_modules),
         "fileNames": file_names,
         "keywords": extract_keywords(text),
+        "patchKeywords": extract_patch_keywords(pr),
         "hasTests": buckets["tests"] > 0,
         "hasCode": buckets["code"] > 0,
         "docsOnly": buckets["docs"] > 0 and sum(v for k, v in buckets.items() if k != "docs") == 0,
@@ -1171,12 +1587,14 @@ def build_duplicate_clusters(
     threshold: float,
     model_name: str,
     refresh_embeddings: bool = False,
+    ai_status: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     real_prs = [pr for pr in prs if isinstance(pr, dict)]
     if len(real_prs) < 2:
         return []
 
-    embeddings = get_pr_embeddings(repo, real_prs, model_name, refresh=refresh_embeddings)
+    ai_status = ai_status or build_ai_status(repo, real_prs)
+    embeddings = get_pr_embedding_sets(repo, real_prs, model_name, refresh=refresh_embeddings)
     edges: dict[int, list[tuple[int, float, dict[str, float]]]] = {index: [] for index in range(len(real_prs))}
     for left in range(len(real_prs)):
         for right in range(left + 1, len(real_prs)):
@@ -1200,8 +1618,14 @@ def build_duplicate_clusters(
             for neighbor, score, _ in edges[i]
             if i < neighbor and neighbor in component
         ]
-        best = max(component_prs, key=canonical_score)
+        cluster_shell = {"members": [{"changelets": pr.get("changelets") or []} for pr in component_prs]}
+        best = max(component_prs, key=lambda pr: canonical_recommendation(pr, cluster=cluster_shell)["score"])
         best_index = real_prs.index(best)
+        best_recommendation = canonical_recommendation(
+            best,
+            cluster=cluster_shell,
+            alignment=(ai_status.get(str(best.get("number"))) or {}).get("alignment"),
+        )
         clusters.append(
             {
                 "id": f"cluster_{len(clusters) + 1:03}",
@@ -1211,13 +1635,24 @@ def build_duplicate_clusters(
                 "averageSimilarity": round(sum(pair_scores) / len(pair_scores), 3) if pair_scores else 0,
                 "bestPr": best.get("number"),
                 "bestTitle": best.get("title"),
-                "bestScore": canonical_score(best),
+                "bestScore": best_recommendation["score"],
+                "reasons": cluster_reasons(component_prs),
+                "recommendation": best_recommendation,
                 "members": sorted(
                     [
                         {
                             "number": pr.get("number"),
                             "title": pr.get("title"),
-                            "canonicalScore": canonical_score(pr),
+                            "canonicalScore": canonical_recommendation(
+                                pr,
+                                cluster=cluster_shell,
+                                alignment=(ai_status.get(str(pr.get("number"))) or {}).get("alignment"),
+                            )["score"],
+                            "bucket": canonical_recommendation(
+                                pr,
+                                cluster=cluster_shell,
+                                alignment=(ai_status.get(str(pr.get("number"))) or {}).get("alignment"),
+                            )["bucket"],
                             "trustScore": (pr.get("contributorTrust") or {}).get("score"),
                             "flags": pr.get("flags") or [],
                             "changelets": pr.get("changelets") or [],
@@ -1246,6 +1681,8 @@ def build_ai_flood_waves(
     cluster_threshold: float,
     model_name: str,
     refresh_embeddings: bool = False,
+    clusters: list[dict[str, Any]] | None = None,
+    ai_status: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     real_prs = [
         pr
@@ -1257,12 +1694,14 @@ def build_ai_flood_waves(
     if len(real_prs) < min_size:
         return []
 
-    clusters = build_duplicate_clusters(
+    ai_status = ai_status or build_ai_status(repo, real_prs)
+    clusters = clusters if clusters is not None else build_duplicate_clusters(
         repo,
         real_prs,
         threshold=cluster_threshold,
         model_name=model_name,
         refresh_embeddings=refresh_embeddings,
+        ai_status=ai_status,
     )
 
     candidates: dict[tuple[int, ...], tuple[str, str, list[dict[str, Any]]]] = {}
@@ -1295,11 +1734,55 @@ def build_ai_flood_waves(
     for label, source, group in candidates.values():
         if not flood_group_has_repeated_intent(group, source):
             continue
-        wave = score_flood_wave(label, source, group)
+        wave = score_flood_wave(label, source, group, ai_status=ai_status)
         if wave["score"] >= threshold:
             waves.append(wave)
 
     return dedupe_flood_waves(sorted(waves, key=lambda wave: (-wave["score"], -len(wave["prs"]), wave["id"])))
+
+
+def build_cluster_index(clusters: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    index: dict[int, dict[str, Any]] = {}
+    for cluster in clusters:
+        for number in cluster.get("prs") or []:
+            index[int_or_zero(number)] = cluster
+    return index
+
+
+def build_flood_index(waves: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    index: dict[int, dict[str, Any]] = {}
+    for wave in waves:
+        for number in wave.get("prs") or []:
+            index[int_or_zero(number)] = wave
+    return index
+
+
+def annotate_cluster_recommendations(
+    clusters: list[dict[str, Any]],
+    prs: list[Any],
+    ai_status: dict[str, Any],
+) -> None:
+    by_number = {pr.get("number"): pr for pr in prs if isinstance(pr, dict)}
+    for cluster in clusters:
+        for member in cluster.get("members") or []:
+            pr = by_number.get(member.get("number"))
+            if not isinstance(pr, dict):
+                continue
+            recommendation = canonical_recommendation(
+                pr,
+                cluster=cluster,
+                alignment=(ai_status.get(str(pr.get("number"))) or {}).get("alignment"),
+            )
+            member["canonicalScore"] = recommendation["score"]
+            member["bucket"] = recommendation["bucket"]
+            member["recommendation"] = recommendation
+        members = cluster.get("members") or []
+        if members:
+            best_member = max(members, key=lambda member: int_or_zero(member.get("canonicalScore")))
+            cluster["bestPr"] = best_member.get("number")
+            cluster["bestTitle"] = best_member.get("title")
+            cluster["bestScore"] = best_member.get("canonicalScore")
+            cluster["recommendation"] = best_member.get("recommendation")
 
 
 def time_window_groups(
@@ -1373,7 +1856,14 @@ def anchor_label(anchor: str) -> str:
     return value
 
 
-def score_flood_wave(label: str, source: str, prs: list[dict[str, Any]]) -> dict[str, Any]:
+def score_flood_wave(
+    label: str,
+    source: str,
+    prs: list[dict[str, Any]],
+    *,
+    ai_status: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    ai_status = ai_status or {}
     dates = [parse_pr_datetime(pr.get("createdAt")) for pr in prs]
     dates = [date for date in dates if date is not None]
     duration = hours_between(min(dates), max(dates)) if dates else 0.0
@@ -1384,6 +1874,13 @@ def score_flood_wave(label: str, source: str, prs: list[dict[str, Any]]) -> dict
     small_diff = sum(1 for pr in prs if (pr.get("signals") or {}).get("smallDiff"))
     no_review = sum(1 for pr in prs if (pr.get("signals") or {}).get("reviewState") == "none")
     low_trust = sum(1 for pr in prs if int_or_zero((pr.get("contributorTrust") or {}).get("score")) < 55)
+    no_tests_or_failing = sum(
+        1
+        for pr in prs
+        if not (pr.get("signals") or {}).get("hasTests") or (pr.get("signals") or {}).get("ciState") == "failing"
+    )
+    generic_descriptions = sum(1 for pr in prs if (pr.get("signals") or {}).get("genericDescription"))
+    alignment_mismatches = sum(1 for pr in prs if pr_alignment_is_mismatch(pr, ai_status))
     repeated_files = top_repeated_count(
         filename
         for pr in prs
@@ -1412,6 +1909,9 @@ def score_flood_wave(label: str, source: str, prs: list[dict[str, Any]]) -> dict
     score += 0.08 * ratio(small_diff, count)
     score += 0.06 * ratio(no_review, count)
     score += 0.08 * ratio(low_trust, count)
+    score += 0.08 * ratio(no_tests_or_failing, count)
+    score += 0.06 * ratio(generic_descriptions, count)
+    score += 0.12 * ratio(alignment_mismatches, count)
     if source == "semantic_cluster":
         score += 0.10
     score = round(min(score, 1.0), 3)
@@ -1425,21 +1925,35 @@ def score_flood_wave(label: str, source: str, prs: list[dict[str, Any]]) -> dict
         small_diff=small_diff,
         no_review=no_review,
         low_trust=low_trust,
+        no_tests_or_failing=no_tests_or_failing,
+        generic_descriptions=generic_descriptions,
+        alignment_mismatches=alignment_mismatches,
         repeated_files=repeated_files,
         repeated_changelets=repeated_changelets,
         repeated_titles=repeated_titles,
         source=source,
     )
-    best = max(prs, key=canonical_score)
+    best = max(
+        prs,
+        key=lambda pr: canonical_recommendation(
+            pr,
+            alignment=(ai_status.get(str(pr.get("number"))) or {}).get("alignment"),
+        )["score"],
+    )
+    origin = flood_origin_pr(prs)
     return {
         "id": flood_id(label, prs),
         "label": label,
         "prs": [pr.get("number") for pr in sorted(prs, key=lambda pr: parse_pr_datetime(pr.get("createdAt")) or datetime.max.replace(tzinfo=timezone.utc))],
+        "members": flood_members(prs, ai_status),
         "score": score,
         "window": format_hours(duration),
         "source": source,
         "bestPr": best.get("number"),
         "bestTitle": best.get("title"),
+        "bestReason": best_candidate_reason(best),
+        "originPr": origin.get("number") if origin else None,
+        "originReason": "earliest PR is at least two hours before the next wave member" if origin else None,
         "reasons": reasons,
         "recommendedAction": flood_recommendation(score, source),
         "metrics": {
@@ -1449,8 +1963,62 @@ def score_flood_wave(label: str, source: str, prs: list[dict[str, Any]]) -> dict
             "smallDiffPrs": small_diff,
             "noReviewPrs": no_review,
             "lowTrustPrs": low_trust,
+            "noTestsOrFailingPrs": no_tests_or_failing,
+            "genericDescriptionPrs": generic_descriptions,
+            "alignmentMismatchPrs": alignment_mismatches,
         },
     }
+
+
+def pr_alignment_is_mismatch(pr: dict[str, Any], ai_status: dict[str, Any]) -> bool:
+    status = ai_status.get(str(pr.get("number"))) or {}
+    alignment = status.get("alignment") or pr.get("alignment") or {}
+    verdict = alignment.get("verdict") or alignment.get("estimatedVerdict")
+    score = alignment.get("score")
+    if score is None:
+        score = alignment.get("estimatedScore")
+    return verdict == "mismatch" or (score is not None and float(score) < 0.55)
+
+
+def flood_members(prs: list[dict[str, Any]], ai_status: dict[str, Any]) -> list[dict[str, Any]]:
+    members: list[dict[str, Any]] = []
+    for pr in sorted(prs, key=lambda item: parse_pr_datetime(item.get("createdAt")) or datetime.max.replace(tzinfo=timezone.utc)):
+        alignment = (ai_status.get(str(pr.get("number"))) or {}).get("alignment") or pr.get("alignment") or {}
+        recommendation = canonical_recommendation(pr, alignment=alignment)
+        members.append(
+            {
+                "number": pr.get("number"),
+                "title": pr.get("title"),
+                "author": (pr.get("author") or {}).get("login"),
+                "trustScore": (pr.get("contributorTrust") or {}).get("score"),
+                "flags": pr.get("flags") or [],
+                "alignmentVerdict": alignment.get("verdict") or alignment.get("estimatedVerdict"),
+                "alignmentScore": alignment.get("score") if alignment.get("score") is not None else alignment.get("estimatedScore"),
+                "bucket": recommendation["bucket"],
+                "canonicalScore": recommendation["score"],
+            }
+        )
+    return members
+
+
+def flood_origin_pr(prs: list[dict[str, Any]]) -> dict[str, Any] | None:
+    dated = sorted(
+        [(parse_pr_datetime(pr.get("createdAt")), pr) for pr in prs],
+        key=lambda item: item[0] or datetime.max.replace(tzinfo=timezone.utc),
+    )
+    dated = [(date, pr) for date, pr in dated if date is not None]
+    if len(dated) < 2:
+        return None
+    if hours_between(dated[0][0], dated[1][0]) >= 2:
+        return dated[0][1]
+    return None
+
+
+def best_candidate_reason(pr: dict[str, Any]) -> str:
+    recommendation = canonical_recommendation(pr)
+    if recommendation.get("reasons"):
+        return str(recommendation["reasons"][0])
+    return f"{recommendation['bucket'].replace('_', ' ')} with score {recommendation['score']}"
 
 
 def dedupe_flood_waves(waves: list[dict[str, Any]], max_overlap: float = 0.55) -> list[dict[str, Any]]:
@@ -1481,6 +2049,9 @@ def flood_reasons(**values: Any) -> list[str]:
         ("small_diff", "small shallow diffs"),
         ("no_review", "no human review"),
         ("low_trust", "low contributor trust scores"),
+        ("no_tests_or_failing", "missing tests or failing CI"),
+        ("generic_descriptions", "generic descriptions"),
+        ("alignment_mismatches", "patch-text mismatches"),
     ]:
         amount = int_or_zero(values.get(key))
         if amount >= max(2, count // 2):
@@ -1584,6 +2155,46 @@ def format_hours(hours: float) -> str:
     return f"{round(hours / 24, 1)} days"
 
 
+def get_pr_embedding_sets(
+    repo: str,
+    prs: list[dict[str, Any]],
+    model_name: str,
+    *,
+    refresh: bool,
+) -> list[dict[str, list[float]]]:
+    cache_path = embedding_cache_path(repo, model_name)
+    cache = {"model": model_name, "items": {}} if refresh else read_embedding_cache(cache_path, model_name)
+    items = cache.setdefault("items", {})
+    requests: list[tuple[int, str, str, str]] = []
+    for index, pr in enumerate(prs):
+        for kind, text in embedding_texts_for_pr(pr).items():
+            key = embedding_cache_key(pr, kind, text)
+            requests.append((index, kind, text, key))
+    missing = [(index, kind, text, key) for index, kind, text, key in requests if key not in items]
+
+    if missing:
+        vectors = encode_texts_with_model([text for _, _, text, _ in missing], model_name)
+        for (index, kind, text, key), vector in zip(missing, vectors):
+            items[key] = {
+                "pr": prs[index].get("number"),
+                "kind": kind,
+                "textHash": sha256_text(text),
+                "embedding": [round(float(value), 8) for value in vector],
+            }
+        write_embedding_cache(cache_path, cache)
+
+    result: list[dict[str, list[float]]] = []
+    for pr in prs:
+        texts = embedding_texts_for_pr(pr)
+        result.append(
+            {
+                kind: items[embedding_cache_key(pr, kind, text)]["embedding"]
+                for kind, text in texts.items()
+            }
+        )
+    return result
+
+
 def get_pr_embeddings(
     repo: str,
     prs: list[dict[str, Any]],
@@ -1591,35 +2202,42 @@ def get_pr_embeddings(
     *,
     refresh: bool,
 ) -> list[list[float]]:
-    cache_path = embedding_cache_path(repo, model_name)
-    cache = {"model": model_name, "items": {}} if refresh else read_embedding_cache(cache_path, model_name)
-    items = cache.setdefault("items", {})
-    texts = [embedding_text_for_pr(pr) for pr in prs]
-    keys = [embedding_cache_key(pr, text) for pr, text in zip(prs, texts)]
-    missing_indices = [index for index, key in enumerate(keys) if key not in items]
-
-    if missing_indices:
-        vectors = encode_texts_with_model([texts[index] for index in missing_indices], model_name)
-        for index, vector in zip(missing_indices, vectors):
-            items[keys[index]] = {
-                "pr": prs[index].get("number"),
-                "textHash": sha256_text(texts[index]),
-                "embedding": [round(float(value), 8) for value in vector],
-            }
-        write_embedding_cache(cache_path, cache)
-
-    return [items[key]["embedding"] for key in keys]
+    """Compatibility wrapper for older tests/callers: returns title/body embeddings."""
+    return [item["titleBody"] for item in get_pr_embedding_sets(repo, prs, model_name, refresh=refresh)]
 
 
-def embedding_text_for_pr(pr: dict[str, Any]) -> str:
-    pieces = [
+def embedding_texts_for_pr(pr: dict[str, Any]) -> dict[str, str]:
+    title_body = [
         f"Title: {pr.get('title') or ''}",
         f"Body: {truncate_text(pr.get('body') or '', 2500)}",
-        "Changelets: " + "; ".join(pr.get("changelets") or []),
-        "Files: " + "; ".join((pr.get("signals") or {}).get("fileNames") or []),
-        "Keywords: " + "; ".join((pr.get("signals") or {}).get("keywords") or []),
+        "Issues: " + "; ".join(extract_issue_refs(pr)),
     ]
-    return "\n".join(piece for piece in pieces if piece.strip())
+    changelet = [
+        "Changelets: " + "; ".join(pr.get("changelets") or []),
+        "Patch keywords: " + "; ".join((pr.get("signals") or {}).get("patchKeywords") or []),
+        "Files: " + "; ".join((pr.get("signals") or {}).get("fileNames") or []),
+        "Behavior: " + "; ".join(infer_behavior_phrases(pr)),
+    ]
+    return {
+        "titleBody": "\n".join(piece for piece in title_body if piece.strip()),
+        "changelet": "\n".join(piece for piece in changelet if piece.strip()),
+    }
+
+
+def infer_behavior_phrases(pr: dict[str, Any]) -> list[str]:
+    phrases: list[str] = []
+    patch_text = "\n".join(file.get("patch") or "" for file in pr.get("files") or [] if isinstance(file, dict)).lower()
+    if re.search(r"\b(return|raise|throw)\b", patch_text):
+        phrases.append("changes control flow")
+    if re.search(r"\btry\b|\bcatch\b|\bexcept\b|\bretry\b|\bfallback\b|\btimeout\b", patch_text):
+        phrases.append("changes error handling or fallback")
+    if re.search(r"\basync\b|\bawait\b|\bstream\b|\byield\b", patch_text):
+        phrases.append("changes async or streaming behavior")
+    if re.search(r"\bselect\b|\binsert\b|\bupdate\b|\bdelete\b|\bupsert\b|\bmigration\b", patch_text):
+        phrases.append("changes persistence behavior")
+    if re.search(r"\b(auth|token|secret|permission|scope|policy)\b", patch_text):
+        phrases.append("changes auth or security behavior")
+    return phrases
 
 
 def encode_texts_with_model(texts: list[str], model_name: str) -> list[list[float]]:
@@ -1658,8 +2276,8 @@ def write_embedding_cache(path: Path, cache: dict[str, Any]) -> None:
     path.write_text(json.dumps(cache, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def embedding_cache_key(pr: dict[str, Any], text: str) -> str:
-    return f"{pr.get('number')}:{sha256_text(text)}"
+def embedding_cache_key(pr: dict[str, Any], kind: str, text: str) -> str:
+    return f"{pr.get('number')}:{kind}:{sha256_text(text)}"
 
 
 def sha256_text(text: str) -> str:
@@ -1673,20 +2291,28 @@ def truncate_text(text: str, limit: int) -> str:
 def hybrid_similarity(
     left: dict[str, Any],
     right: dict[str, Any],
-    left_embedding: list[float],
-    right_embedding: list[float],
+    left_embedding: dict[str, list[float]] | list[float],
+    right_embedding: dict[str, list[float]] | list[float],
 ) -> tuple[float, dict[str, float]]:
-    embedding = cosine_similarity(left_embedding, right_embedding)
+    if isinstance(left_embedding, dict) and isinstance(right_embedding, dict):
+        title_body = cosine_similarity(left_embedding.get("titleBody") or [], right_embedding.get("titleBody") or [])
+        changelet_embedding = cosine_similarity(left_embedding.get("changelet") or [], right_embedding.get("changelet") or [])
+    else:
+        title_body = cosine_similarity(left_embedding if isinstance(left_embedding, list) else [], right_embedding if isinstance(right_embedding, list) else [])
+        changelet_embedding = jaccard(left.get("changelets") or [], right.get("changelets") or [])
     changelet = jaccard(left.get("changelets") or [], right.get("changelets") or [])
     files = jaccard((left.get("signals") or {}).get("fileNames") or [], (right.get("signals") or {}).get("fileNames") or [])
-    keywords = jaccard((left.get("signals") or {}).get("keywords") or [], (right.get("signals") or {}).get("keywords") or [])
+    patch_keywords = jaccard((left.get("signals") or {}).get("patchKeywords") or [], (right.get("signals") or {}).get("patchKeywords") or [])
     issues = jaccard(extract_issue_refs(left), extract_issue_refs(right))
-    score = 0.65 * embedding + 0.15 * changelet + 0.12 * files + 0.05 * keywords + 0.03 * issues
+    score = 0.35 * title_body + 0.30 * changelet_embedding + 0.20 * files + 0.10 * patch_keywords + 0.05 * issues
     components = {
-        "embedding": round(embedding, 3),
+        "titleBodyEmbedding": round(title_body, 3),
+        "changeletEmbedding": round(changelet_embedding, 3),
+        "embedding": round((title_body + changelet_embedding) / 2, 3),
         "changelet": round(changelet, 3),
         "files": round(files, 3),
-        "keywords": round(keywords, 3),
+        "patchKeywords": round(patch_keywords, 3),
+        "keywords": round(patch_keywords, 3),
         "issues": round(issues, 3),
     }
     return round(score, 3), components
@@ -1740,9 +2366,16 @@ def pair_has_specific_overlap(left: dict[str, Any], right: dict[str, Any], compo
 
 
 def shared_specific_changelets(left: dict[str, Any], right: dict[str, Any]) -> set[str]:
-    left_changelets = {changelet for changelet in left.get("changelets") or [] if changelet not in GENERIC_CLUSTER_CHANGELETS}
-    right_changelets = {changelet for changelet in right.get("changelets") or [] if changelet not in GENERIC_CLUSTER_CHANGELETS}
+    left_changelets = {changelet for changelet in left.get("changelets") or [] if is_specific_cluster_changelet(changelet)}
+    right_changelets = {changelet for changelet in right.get("changelets") or [] if is_specific_cluster_changelet(changelet)}
     return left_changelets & right_changelets
+
+
+def is_specific_cluster_changelet(changelet: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(changelet).strip().lower())
+    if not normalized or normalized.startswith("touch "):
+        return False
+    return normalized not in GENERIC_CLUSTER_CHANGELETS
 
 
 def shared_specific_files(left: dict[str, Any], right: dict[str, Any]) -> set[str]:
@@ -1824,7 +2457,7 @@ def label_cluster(prs: list[dict[str, Any]]) -> str:
     counts: dict[str, int] = {}
     for pr in prs:
         for changelet in pr.get("changelets") or []:
-            if changelet in GENERIC_CLUSTER_CHANGELETS:
+            if not is_specific_cluster_changelet(changelet):
                 continue
             counts[changelet] = counts.get(changelet, 0) + 1
     if counts:
@@ -1835,28 +2468,299 @@ def label_cluster(prs: list[dict[str, Any]]) -> str:
             title_keywords[keyword] = title_keywords.get(keyword, 0) + 1
     if title_keywords:
         return " / ".join(keyword for keyword, _ in sorted(title_keywords.items(), key=lambda item: (-item[1], item[0]))[:3])
+    patch_keywords: dict[str, int] = {}
+    for pr in prs:
+        for keyword in (pr.get("signals") or {}).get("patchKeywords") or []:
+            if keyword in STOP_WORDS:
+                continue
+            patch_keywords[keyword] = patch_keywords.get(keyword, 0) + 1
+    repeated_patch = [keyword for keyword, count in sorted(patch_keywords.items(), key=lambda item: (-item[1], item[0])) if count > 1]
+    if repeated_patch:
+        return " / ".join(repeated_patch[:3])
     return "similar PRs"
 
 
+def cluster_reasons(prs: list[dict[str, Any]]) -> list[str]:
+    reasons = [f"{len(prs)} PRs share semantic intent"]
+    files = top_repeated_labels(
+        filename
+        for pr in prs
+        for filename in (pr.get("signals") or {}).get("fileNames") or []
+        if is_specific_cluster_file(filename)
+    )
+    changelets = top_repeated_labels(
+        changelet
+        for pr in prs
+        for changelet in pr.get("changelets") or []
+        if is_specific_cluster_changelet(changelet)
+    )
+    patch_keywords = top_repeated_labels(
+        keyword
+        for pr in prs
+        for keyword in (pr.get("signals") or {}).get("patchKeywords") or []
+    )
+    issues = top_repeated_labels(issue for pr in prs for issue in extract_issue_refs(pr))
+    if changelets:
+        reasons.append("common changelets: " + ", ".join(changelets[:3]))
+    if files:
+        reasons.append("common files: " + ", ".join(files[:3]))
+    if patch_keywords:
+        reasons.append("common patch keywords: " + ", ".join(patch_keywords[:3]))
+    if issues:
+        reasons.append("linked issues: " + ", ".join(issues[:3]))
+    return reasons[:5]
+
+
+def top_repeated_labels(values: Any, *, minimum: int = 2) -> list[str]:
+    counts: dict[str, int] = {}
+    for value in values:
+        if not value:
+            continue
+        label = str(value).lower()
+        counts[label] = counts.get(label, 0) + 1
+    return [
+        label
+        for label, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+        if count >= minimum
+    ]
+
+
 def canonical_score(pr: dict[str, Any]) -> int:
+    return int(canonical_recommendation(pr)["score"])
+
+
+def canonical_recommendation(
+    pr: dict[str, Any],
+    *,
+    cluster: dict[str, Any] | None = None,
+    flood: dict[str, Any] | None = None,
+    alignment: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     signals = pr.get("signals") or {}
     flags = pr.get("flags") or []
     trust = pr.get("contributorTrust") or {}
-    score = int_or_zero(trust.get("score"))
+    score_breakdown: dict[str, int] = {}
+    reasons: list[str] = []
+    risks: list[str] = []
+
+    score_breakdown["contributor_trust"] = int_or_zero(trust.get("score"))
+    if score_breakdown["contributor_trust"] >= 70:
+        reasons.append("strong contributor trust signal")
+    elif score_breakdown["contributor_trust"] < 45:
+        risks.append("limited contributor trust signal")
+
+    coverage = int(round(changelet_coverage(pr, cluster) * 14))
+    score_breakdown["changelet_coverage"] = coverage
+    if coverage >= 10:
+        reasons.append("covers the main cluster changelets")
+
     if signals.get("hasTests"):
-        score += 12
+        score_breakdown["tests_present"] = 12
+        reasons.append("includes tests")
+    else:
+        score_breakdown["tests_present"] = 0
     if signals.get("ciState") == "passing":
-        score += 12
+        score_breakdown["ci_passing"] = 12
+        reasons.append("CI is passing")
+    elif signals.get("ciState") == "failing":
+        score_breakdown["ci_passing"] = -12
+        risks.append("CI is failing")
+    else:
+        score_breakdown["ci_passing"] = 0
     if signals.get("smallDiff"):
-        score += 8
+        score_breakdown["small_focused_diff"] = 8
+        reasons.append("small focused diff")
+    elif signals.get("largeDiff"):
+        score_breakdown["small_focused_diff"] = -8
+        risks.append("large diff")
+    else:
+        score_breakdown["small_focused_diff"] = 0
+    clarity = description_clarity_score(pr)
+    score_breakdown["clear_description"] = clarity
+    if clarity >= 6:
+        reasons.append("clear description")
+    elif clarity < 0:
+        risks.append("generic or thin description")
     if signals.get("reviewState") in {"approved", "reviewed"}:
-        score += 8
-    score -= 5 * len([flag for flag in flags if flag in LOW_VALUE_FLAGS])
+        score_breakdown["reviewer_activity"] = 8
+        reasons.append("has reviewer activity")
+    else:
+        score_breakdown["reviewer_activity"] = 0
+
+    entropy = unrelated_change_entropy(pr)
+    score_breakdown["unrelated_change_entropy"] = -entropy
+    if entropy >= 10:
+        risks.append("high unrelated-change entropy")
+    dependency_bloat = dependency_bloat_score(pr)
+    score_breakdown["dependency_bloat"] = -dependency_bloat
+    if dependency_bloat >= 8:
+        risks.append("dependency/config bloat")
+    generated_churn = generated_churn_score(pr)
+    score_breakdown["generated_file_churn"] = -generated_churn
+    if generated_churn:
+        risks.append("generated-file churn")
+
+    low_value_penalty = 5 * len([flag for flag in flags if flag in LOW_VALUE_FLAGS])
+    score_breakdown["low_value_flags"] = -low_value_penalty
+    if low_value_penalty:
+        risks.append("low-value deterministic flags")
     if "core_change_without_tests" in flags:
-        score -= 10
+        score_breakdown["core_change_without_tests"] = -12
+        risks.append("core change without tests")
+    else:
+        score_breakdown["core_change_without_tests"] = 0
     if "large_unrelated_refactor" in flags:
-        score -= 10
-    return clamp_score(score)
+        score_breakdown["large_unrelated_refactor"] = -10
+        risks.append("large unrelated refactor risk")
+    else:
+        score_breakdown["large_unrelated_refactor"] = 0
+
+    alignment_penalty = patch_text_mismatch_penalty(pr, alignment)
+    score_breakdown["patch_text_alignment"] = -alignment_penalty
+    if alignment_penalty >= 12:
+        risks.append("patch-text mismatch")
+    flood_penalty = 10 if flood else 0
+    score_breakdown["ai_flood_penalty"] = -flood_penalty
+    if flood_penalty:
+        risks.append("member of possible AI-flood wave")
+
+    raw_score = sum(score_breakdown.values())
+    score = clamp_score(raw_score)
+    bucket = recommendation_bucket(pr, score, risks, cluster=cluster, flood=flood)
+    confidence = recommendation_confidence(pr, alignment=alignment, cluster=cluster)
+    return {
+        "bucket": bucket,
+        "score": score,
+        "confidence": confidence,
+        "reasons": unique_strings(reasons)[:6],
+        "risks": unique_strings(risks)[:6],
+        "scoreBreakdown": score_breakdown,
+    }
+
+
+def recommendation_bucket(
+    pr: dict[str, Any],
+    score: int,
+    risks: list[str],
+    *,
+    cluster: dict[str, Any] | None,
+    flood: dict[str, Any] | None,
+) -> str:
+    flags = set(pr.get("flags") or [])
+    signals = pr.get("signals") or {}
+    if "patch-text mismatch" in risks or flags & {"patch_text_mismatch", "claim_tests_missing", "claim_perf_but_formatting"}:
+        return "needs_human"
+    if flags & LOW_VALUE_FLAGS and score < 45:
+        return "probably_junk"
+    if cluster and score < int_or_zero(cluster.get("bestScore")) - 18:
+        return "safe_close_duplicate"
+    if flood and score < 55:
+        return "safe_close_duplicate"
+    if score >= 72 and not signals.get("largeDiff"):
+        return "review_first"
+    if score >= 48:
+        return "risky_but_maybe_valuable"
+    return "needs_human"
+
+
+def recommendation_confidence(
+    pr: dict[str, Any],
+    *,
+    alignment: dict[str, Any] | None,
+    cluster: dict[str, Any] | None,
+) -> float:
+    confidence = 0.58
+    signals = pr.get("signals") or {}
+    if signals.get("ciState") in {"passing", "failing"}:
+        confidence += 0.08
+    if signals.get("reviewState") != "none":
+        confidence += 0.06
+    if alignment:
+        confidence += 0.12
+    elif (pr.get("alignment") or {}).get("estimatedScore") is not None:
+        confidence += 0.04
+    if cluster:
+        confidence += 0.08
+    if signals.get("genericDescription"):
+        confidence -= 0.05
+    return round(max(0.3, min(0.95, confidence)), 2)
+
+
+def changelet_coverage(pr: dict[str, Any], cluster: dict[str, Any] | None = None) -> float:
+    own = {changelet for changelet in pr.get("changelets") or [] if is_specific_cluster_changelet(changelet)}
+    if not cluster:
+        return min(1.0, len(own) / 3) if own else 0.0
+    cluster_changelets = {
+        changelet
+        for member in cluster.get("members") or []
+        for changelet in member.get("changelets") or []
+        if is_specific_cluster_changelet(changelet)
+    }
+    if not cluster_changelets:
+        return min(1.0, len(own) / 3) if own else 0.0
+    return len(own & cluster_changelets) / len(cluster_changelets)
+
+
+def unrelated_change_entropy(pr: dict[str, Any]) -> int:
+    signals = pr.get("signals") or {}
+    buckets = signals.get("fileBuckets") or {}
+    touched = len(signals.get("touchedModules") or [])
+    active_buckets = len([bucket for bucket, count in buckets.items() if int_or_zero(count) > 0])
+    entropy = max(0, touched - 2) * 4 + max(0, active_buckets - 3) * 4
+    if signals.get("largeDiff"):
+        entropy += 6
+    if signals.get("hasCode") and signals.get("docsOnly"):
+        entropy += 3
+    return min(20, entropy)
+
+
+def dependency_bloat_score(pr: dict[str, Any]) -> int:
+    signals = pr.get("signals") or {}
+    dependency_files = signals.get("dependencyFilesChanged") or []
+    if not dependency_files:
+        return 0
+    score = min(14, 4 * len(dependency_files))
+    if not signals.get("hasCode"):
+        score += 6
+    if "dependency_without_usage" in (pr.get("flags") or []):
+        score += 6
+    return min(20, score)
+
+
+def generated_churn_score(pr: dict[str, Any]) -> int:
+    generated = int_or_zero((pr.get("signals") or {}).get("generatedFilesChanged"))
+    if not generated:
+        return 0
+    return min(16, 5 * generated)
+
+
+def description_clarity_score(pr: dict[str, Any]) -> int:
+    signals = pr.get("signals") or {}
+    length = int_or_zero(signals.get("descriptionLength"))
+    if signals.get("genericDescription") or length < 20:
+        return -6
+    if length >= 180:
+        return 8
+    if length >= 80:
+        return 5
+    return 2
+
+
+def patch_text_mismatch_penalty(pr: dict[str, Any], alignment: dict[str, Any] | None = None) -> int:
+    source = alignment or pr.get("alignment") or {}
+    score = source.get("score")
+    if score is None:
+        score = source.get("estimatedScore")
+    if score is None:
+        return 0
+    value = float(score)
+    if value < 0.35:
+        return 22
+    if value < 0.55:
+        return 14
+    if value < 0.72:
+        return 6
+    return 0
 
 
 def compute_signal_summary(prs: list[Any]) -> dict[str, Any]:
@@ -2003,6 +2907,49 @@ def extract_keywords(text: str, limit: int = 12) -> list[str]:
             continue
         counts[word] = counts.get(word, 0) + 1
     return [word for word, _ in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]]
+
+
+def extract_patch_keywords(pr: dict[str, Any], limit: int = 32) -> list[str]:
+    files = [file for file in pr.get("files") or [] if isinstance(file, dict)]
+    counts: dict[str, int] = {}
+    for file in files:
+        filename = normalize_path(file.get("filename") or "")
+        for token in patch_keyword_tokens(file.get("patch") or "", filename):
+            counts[token] = counts.get(token, 0) + 1
+    return [token for token, _ in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]]
+
+
+def patch_keyword_tokens(patch: str, filename: str) -> list[str]:
+    tokens: list[str] = []
+    basename = Path(filename).name.lower()
+    if basename in DEPENDENCY_FILES or basename in LOCKFILE_NAMES:
+        tokens.append(basename)
+    for line in patch.splitlines():
+        if not line.startswith(("+", "-")) or line.startswith(("+++", "---")):
+            continue
+        text = line[1:].strip()
+        lowered = text.lower()
+        patterns = [
+            r"\bdef\s+([A-Za-z_][A-Za-z0-9_]*)",
+            r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)",
+            r"\bfunction\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+            r"\bconst\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+            r"\blet\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+            r"\bvar\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+            r"\bimport\s+.*?\bfrom\s+['\"]([^'\"]+)['\"]",
+            r"\brequire\(['\"]([^'\"]+)['\"]\)",
+            r"['\"]([A-Z][A-Z0-9_]{2,})['\"]",
+            r"\b([A-Z][A-Z0-9_]{2,})\b",
+            r"\b([a-z][a-z0-9_-]{2,})\s*[:=]",
+        ]
+        for pattern in patterns:
+            for match in re.findall(pattern, text):
+                token = str(match).strip().lower()
+                if token and token not in STOP_WORDS:
+                    tokens.append(token)
+        if re.search(r"\b(error|exception|panic|timeout|retry|fallback|crash|failed|failure)\b", lowered):
+            tokens.extend(extract_keywords(lowered, limit=6))
+    return unique_strings(tokens)
 
 
 def is_generic_description(title: str, body: str) -> bool:
@@ -2673,6 +3620,27 @@ def print_signal_report(data: dict[str, Any]) -> None:
                 f"({trust.get('bucket', 'unknown')}): {trust.get('explanation', '')}"
             )
 
+    analysis = data.get("analysis") or {}
+    review_queue = analysis.get("reviewQueue") or []
+    if review_queue:
+        print()
+        print("Review queues:")
+        for bucket in [
+            "review_first",
+            "safe_close_duplicate",
+            "needs_human",
+            "probably_junk",
+            "risky_but_maybe_valuable",
+        ]:
+            items = [item for item in review_queue if item.get("bucket") == bucket]
+            print(f"- {bucket}: {len(items)}")
+        print()
+        for item in review_queue[:20]:
+            print(
+                f"- #{item.get('pr')} {item.get('bucket')} {item.get('score')}/100: "
+                f"{item.get('title')}"
+            )
+
 
 def print_changelets(data: dict[str, Any], *, limit: int) -> None:
     prs = [pr for pr in data.get("prs", []) if isinstance(pr, dict)]
@@ -2689,7 +3657,7 @@ def print_changelets(data: dict[str, Any], *, limit: int) -> None:
 
 
 def print_clusters(data: dict[str, Any], *, limit: int) -> None:
-    clusters = [cluster for cluster in data.get("clusters", []) if isinstance(cluster, dict)]
+    clusters = [cluster for cluster in (data.get("analysis") or {}).get("clusters", []) if isinstance(cluster, dict)]
     print("Semantic PR Clusters")
     print("--------------------")
     print(f"Repo: {data.get('repo', 'unknown')}")
@@ -2708,7 +3676,7 @@ def print_clusters(data: dict[str, Any], *, limit: int) -> None:
             flags = ", ".join(member.get("flags") or [])
             suffix = f" flags: {flags}" if flags else ""
             print(
-                f"- #{member.get('number')} {member.get('canonicalScore')}/100 "
+                f"- #{member.get('number')} {member.get('bucket')} {member.get('canonicalScore')}/100 "
                 f"sim {member.get('similarityToBest')}: {member.get('title')}{suffix}"
             )
         print()
@@ -2730,7 +3698,15 @@ def print_flood_waves(data: dict[str, Any], waves: list[dict[str, Any]], *, limi
             f"({len(wave.get('prs') or [])} PRs, score {wave.get('score')}, {wave.get('window')})"
         )
         print(f"Best candidate: #{wave.get('bestPr')} {wave.get('bestTitle')}")
-        print(f"PRs: {', '.join('#' + str(number) for number in wave.get('prs') or [])}")
+        if wave.get("originPr"):
+            print(f"Origin: #{wave.get('originPr')} ({wave.get('originReason')})")
+        print(f"Best reason: {wave.get('bestReason')}")
+        print("Members:")
+        for member in wave.get("members") or []:
+            print(
+                f"- #{member.get('number')} {member.get('bucket')} trust {member.get('trustScore')} "
+                f"align {member.get('alignmentVerdict')}: {member.get('title')}"
+            )
         reasons = wave.get("reasons") or []
         if reasons:
             print("Reasons:")

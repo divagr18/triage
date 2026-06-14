@@ -1,11 +1,16 @@
 import { useEffect, useState } from 'react'
-import { AlertTriangle, ExternalLink, ThumbsUp, X } from 'lucide-react'
-import type { PullRequest } from '../types'
+import { AlertTriangle, Brain, ExternalLink, Loader2, Sparkles, ThumbsUp, X } from 'lucide-react'
+import type { AiCache, PrCluster, PullRequest } from '../types'
+import type { AiActionRequest } from '../useTriageData'
 import { ciColor, formatFlag, reviewColor, trustColor } from '../utils'
 import { PrDiff } from './PrDiff'
 
 interface Props {
   pr: PullRequest | null
+  prs?: PullRequest[]
+  clusters?: PrCluster[]
+  ai?: AiCache
+  onRunAi?: (body: AiActionRequest) => Promise<unknown> | void
   onClose: () => void
 }
 
@@ -20,8 +25,25 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
-export function PrDetail({ pr, onClose }: Props) {
-  const [tab, setTab] = useState<'overview' | 'diff'>('overview')
+function ScoreBar({ value }: { value: number }) {
+  const percent = Math.max(0, Math.min(100, Math.round(value * 100)))
+  return (
+    <div>
+      <div className="mb-1 flex items-center justify-between text-xs">
+        <span className="text-zinc-500">Alignment score</span>
+        <span className="font-mono text-sky-200">{percent}</span>
+      </div>
+      <div className="h-2 overflow-hidden rounded-full bg-zinc-900">
+        <div className="h-full rounded-full bg-sky-400" style={{ width: `${percent}%` }} />
+      </div>
+    </div>
+  )
+}
+
+export function PrDetail({ pr, prs = [], clusters = [], ai, onRunAi, onClose }: Props) {
+  const [tab, setTab] = useState<'overview' | 'ai' | 'diff'>('overview')
+  const [running, setRunning] = useState<'align' | 'explain' | 'compare' | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -39,8 +61,44 @@ export function PrDetail({ pr, onClose }: Props) {
 
   if (!pr) return null
 
+  const prNumber = pr.number
   const trust = pr.contributorTrust
   const signals = pr.signals
+  const alignment = ai?.alignment[String(prNumber)]
+  const explain = ai?.explain[String(prNumber)]
+  const compareTarget = findCompareTarget(pr, prs, clusters)
+  const compare = ai?.compare.find(
+    (item) =>
+      compareTarget &&
+      ((item.leftPr === pr.number && item.rightPr === compareTarget.number) ||
+        (item.rightPr === pr.number && item.leftPr === compareTarget.number)),
+  )
+
+  async function runAi(action: 'align' | 'explain') {
+    if (!onRunAi) return
+    setRunning(action)
+    setError(null)
+    try {
+      await onRunAi({ action, pr: prNumber })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setRunning(null)
+    }
+  }
+
+  async function runCompare() {
+    if (!onRunAi || !compareTarget) return
+    setRunning('compare')
+    setError(null)
+    try {
+      await onRunAi({ action: 'compare', left: prNumber, right: compareTarget.number })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setRunning(null)
+    }
+  }
 
   return (
     <div
@@ -80,7 +138,7 @@ export function PrDetail({ pr, onClose }: Props) {
         </div>
 
         <div className="flex border-b border-zinc-800 bg-black/25 px-5">
-          {(['overview', 'diff'] as const).map((item) => (
+          {(['overview', 'ai', 'diff'] as const).map((item) => (
             <button
               key={item}
               onClick={() => setTab(item)}
@@ -223,6 +281,146 @@ export function PrDetail({ pr, onClose }: Props) {
                 )}
               </div>
             </div>
+          ) : tab === 'ai' ? (
+            <div className="grid gap-5 lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+              <div className="space-y-5">
+                <Section title="Run analysis">
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    <button
+                      onClick={() => void runAi('align')}
+                      disabled={!onRunAi || running !== null}
+                      className="flex items-center justify-center gap-2 rounded-md border border-sky-500/25 bg-sky-500/10 px-3 py-2 text-xs font-medium text-sky-200 transition hover:border-sky-400/45 disabled:opacity-60"
+                    >
+                      {running === 'align' ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                      Align patch text
+                    </button>
+                    <button
+                      onClick={() => void runAi('explain')}
+                      disabled={!onRunAi || running !== null}
+                      className="flex items-center justify-center gap-2 rounded-md border border-violet-500/25 bg-violet-500/10 px-3 py-2 text-xs font-medium text-violet-200 transition hover:border-violet-400/45 disabled:opacity-60"
+                    >
+                      {running === 'explain' ? <Loader2 size={14} className="animate-spin" /> : <Brain size={14} />}
+                      Explain with Codex
+                    </button>
+                    <button
+                      onClick={() => void runCompare()}
+                      disabled={!onRunAi || running !== null || !compareTarget}
+                      className="flex items-center justify-center gap-2 rounded-md border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-200 transition hover:border-emerald-400/45 disabled:opacity-60"
+                    >
+                      {running === 'compare' ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                      Compare peer
+                    </button>
+                  </div>
+                  {error && (
+                    <div className="mt-3 rounded-md border border-red-400/20 bg-red-400/[0.08] px-3 py-2 text-xs text-red-200">
+                      {error}
+                    </div>
+                  )}
+                  {!alignment && !explain && !compare && (
+                    <p className="mt-3 text-xs leading-5 text-zinc-500">
+                      No cached AI analysis for this PR yet.
+                    </p>
+                  )}
+                </Section>
+
+                {alignment && (
+                  <Section title="Patch-text alignment">
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <span className="rounded-md border border-sky-400/20 bg-sky-400/[0.08] px-2 py-1 text-xs font-medium text-sky-200">
+                        {alignment.verdict}
+                      </span>
+                      <span className="text-xs text-zinc-500">
+                        {alignment._cachedAt ? new Date(alignment._cachedAt).toLocaleString() : 'cached'}
+                      </span>
+                    </div>
+                    <ScoreBar value={alignment.alignmentScore} />
+                    <div className="mt-4 space-y-3">
+                      <div>
+                        <div className="mb-1 text-xs font-medium text-zinc-300">Claimed intent</div>
+                        <p className="text-sm leading-6 text-zinc-400">{alignment.claimedIntent}</p>
+                      </div>
+                      <div>
+                        <div className="mb-1 text-xs font-medium text-zinc-300">Actual change</div>
+                        <p className="text-sm leading-6 text-zinc-400">{alignment.actualChange}</p>
+                      </div>
+                    </div>
+                  </Section>
+                )}
+              </div>
+
+              <div className="space-y-5">
+                {compare && (
+                  <Section title="Codex compare">
+                    <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
+                      <span className="rounded-md border border-emerald-400/20 bg-emerald-400/[0.08] px-2 py-1 font-medium text-emerald-200">
+                        better: #{compare.betterReviewCandidate}
+                      </span>
+                      <span className="text-zinc-500">
+                        vs #{compare.leftPr === pr.number ? compare.rightPr : compare.leftPr}
+                      </span>
+                      <span className="text-zinc-500">{Math.round(compare.confidence * 100)}%</span>
+                    </div>
+                    <p className="text-sm leading-6 text-zinc-300">{compare.canonicalRationale}</p>
+                    <p className="mt-3 text-xs leading-5 text-zinc-500">{compare.suggestedAction}</p>
+                  </Section>
+                )}
+
+                {explain && (
+                  <Section title="Codex explanation">
+                    <div className="mb-3 flex flex-wrap items-center gap-2">
+                      <span className={`rounded-md border px-2 py-1 text-xs font-medium ${trustColor(explain.riskLevel === 'low' ? 'high' : explain.riskLevel === 'high' ? 'low' : 'medium')}`}>
+                        {explain.riskLevel} risk
+                      </span>
+                      <span className="rounded-md border border-violet-400/20 bg-violet-400/[0.08] px-2 py-1 text-xs font-medium text-violet-200">
+                        {explain.recommendedAction.replace(/_/g, ' ')}
+                      </span>
+                      <span className="text-xs text-zinc-500">
+                        {Math.round(explain.confidence * 100)}% confidence
+                      </span>
+                    </div>
+                    <p className="mb-4 text-sm leading-6 text-zinc-300">{explain.summary}</p>
+                    <div className="grid gap-4 md:grid-cols-2">
+                      {explain.reasons.length > 0 && (
+                        <div>
+                          <div className="mb-2 text-xs font-medium text-zinc-300">Reasons</div>
+                          <ul className="space-y-2">
+                            {explain.reasons.slice(0, 5).map((reason) => (
+                              <li key={reason} className="text-xs leading-5 text-zinc-400">
+                                {reason}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {explain.risks.length > 0 && (
+                        <div>
+                          <div className="mb-2 text-xs font-medium text-zinc-300">Risks</div>
+                          <ul className="space-y-2">
+                            {explain.risks.slice(0, 5).map((risk) => (
+                              <li key={risk} className="text-xs leading-5 text-zinc-400">
+                                {risk}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                    {explain.questionsForMaintainer.length > 0 && (
+                      <div className="mt-4 rounded-md border border-zinc-800 bg-black/25 p-3">
+                        <div className="mb-2 text-xs font-medium text-zinc-300">Maintainer questions</div>
+                        <ul className="space-y-1.5">
+                          {explain.questionsForMaintainer.map((question) => (
+                            <li key={question} className="text-xs leading-5 text-zinc-500">
+                              {question}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </Section>
+                )}
+              </div>
+            </div>
           ) : (
             <PrDiff pr={pr} />
           )}
@@ -230,4 +428,13 @@ export function PrDetail({ pr, onClose }: Props) {
       </div>
     </div>
   )
+}
+
+function findCompareTarget(pr: PullRequest, prs: PullRequest[], clusters: PrCluster[]) {
+  const cluster = clusters.find((item) => item.prs.includes(pr.number))
+  if (!cluster) return null
+  const targetNumber =
+    cluster.bestPr !== pr.number ? cluster.bestPr : cluster.prs.find((number) => number !== pr.number)
+  if (!targetNumber) return null
+  return prs.find((candidate) => candidate.number === targetNumber) ?? null
 }

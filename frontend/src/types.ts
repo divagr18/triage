@@ -149,6 +149,74 @@ export interface TriageCache {
   source: string
   prs: PullRequest[]
   signalSummary: SignalSummary
+  ai?: AiCache
+}
+
+export interface AiCache {
+  alignment: Record<string, PatchTextAlignment>
+  explain: Record<string, CodexPrExplain>
+  recommendations: CodexRecommendationBatch[]
+  compare: CodexCompare[]
+}
+
+export interface PatchTextAlignment {
+  _cachedAt?: string
+  _provider?: string
+  pr: number
+  alignmentScore: number
+  verdict: 'aligned' | 'partial' | 'mismatch' | 'unclear' | string
+  claimedIntent: string
+  actualChange: string
+  mismatches: string[]
+  evidence: string[]
+  confidence: number
+}
+
+export interface CodexPrExplain {
+  _cachedAt?: string
+  _provider?: string
+  pr: number
+  summary: string
+  actualChange: string
+  patchTextAlignment: 'aligned' | 'partial' | 'mismatch' | 'unclear' | string
+  riskLevel: 'low' | 'medium' | 'high' | string
+  recommendedAction: string
+  confidence: number
+  reasons: string[]
+  risks: string[]
+  questionsForMaintainer: string[]
+}
+
+export interface CodexActionRecommendation {
+  pr: number
+  priority: number
+  action: string
+  confidence: number
+  reason: string
+  risks: string[]
+}
+
+export interface CodexRecommendationBatch {
+  _cachedAt?: string
+  _provider?: string
+  summary: string
+  recommendations: CodexActionRecommendation[]
+}
+
+export interface CodexCompare {
+  _cachedAt?: string
+  _provider?: string
+  leftPr: number
+  rightPr: number
+  sameIntent: boolean
+  betterReviewCandidate: number
+  canonicalRationale: string
+  leftStrengths: string[]
+  rightStrengths: string[]
+  leftRisks: string[]
+  rightRisks: string[]
+  suggestedAction: string
+  confidence: number
 }
 
 export interface FloodWave {

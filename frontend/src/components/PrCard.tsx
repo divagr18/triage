@@ -1,13 +1,15 @@
-import type { PullRequest } from '../types'
+import type { CodexPrExplain, PatchTextAlignment, PullRequest } from '../types'
 import { ciColor, formatDate, formatFlag, reviewColor, trustColor } from '../utils'
 
 interface Props {
   pr: PullRequest
   selected: boolean
+  aiAlignment?: PatchTextAlignment
+  aiExplain?: CodexPrExplain
   onClick: () => void
 }
 
-export function PrCard({ pr, selected, onClick }: Props) {
+export function PrCard({ pr, selected, aiAlignment, aiExplain, onClick }: Props) {
   const trust = pr.contributorTrust
   const signals = pr.signals
 
@@ -45,6 +47,16 @@ export function PrCard({ pr, selected, onClick }: Props) {
             {signals.reviewState !== 'none' && (
               <span className={reviewColor(signals.reviewState)}>
                 {signals.reviewState.replace(/_/g, ' ')}
+              </span>
+            )}
+            {aiAlignment && (
+              <span className="rounded-md border border-sky-400/20 bg-sky-400/[0.08] px-2 py-0.5 text-xs text-sky-200">
+                align {Math.round(aiAlignment.alignmentScore * 100)}
+              </span>
+            )}
+            {aiExplain && (
+              <span className="rounded-md border border-violet-400/20 bg-violet-400/[0.08] px-2 py-0.5 text-xs text-violet-200">
+                Codex
               </span>
             )}
           </div>

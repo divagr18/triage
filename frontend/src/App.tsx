@@ -6,6 +6,7 @@ import { FileBucketsChart } from './components/FileBucketsChart'
 import { FlagsList } from './components/FlagsList'
 import { FocusQueue } from './components/FocusQueue'
 import { FloodWaves } from './components/FloodWaves'
+import { AiReviewPlan } from './components/AiReviewPlan'
 import { PrList } from './components/PrList'
 import { PrDetail } from './components/PrDetail'
 import { Sidebar, type PageKey } from './components/Sidebar'
@@ -105,12 +106,14 @@ export default function App() {
   const { repos, loading: loadingRepos } = useRepos()
   const [selectedSlugOverride, setSelectedSlugOverride] = useState<string | null>(null)
   const selectedSlug = selectedSlugOverride ?? repos[0]?.slug ?? null
-  const { data, loading: loadingData } = useRepoData(selectedSlug)
+  const { data, loading: loadingData, runAiAction } = useRepoData(selectedSlug)
   const [selectedPrState, setSelectedPrState] = useState<{
     repoSlug: string | null
     pr: PullRequest
   } | null>(null)
   const [page, setPage] = useState<PageKey>('overview')
+  const [runningReviewPlan, setRunningReviewPlan] = useState(false)
+  const [reviewPlanError, setReviewPlanError] = useState<string | null>(null)
 
   const selectedPr = selectedPrState?.repoSlug === selectedSlug ? selectedPrState.pr : null
   const selectPr = (pr: PullRequest) => setSelectedPrState({ repoSlug: selectedSlug, pr })
@@ -125,6 +128,19 @@ export default function App() {
     () => new Set(floodWaves.flatMap((wave) => wave.prs)),
     [floodWaves],
   )
+  const latestRecommendation = data?.ai?.recommendations[0]
+
+  async function runReviewPlan() {
+    setRunningReviewPlan(true)
+    setReviewPlanError(null)
+    try {
+      await runAiAction({ action: 'recommend', limit: 5 })
+    } catch (e) {
+      setReviewPlanError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setRunningReviewPlan(false)
+    }
+  }
 
   return (
     <div className="flex min-h-screen flex-col bg-[#030303]">
@@ -154,6 +170,14 @@ export default function App() {
                     <ScanHeader data={data} />
                     <Metrics data={data} floodWaves={floodWaves} />
                     <CommandStrip data={data} />
+                    <AiReviewPlan
+                      batch={latestRecommendation}
+                      prs={data.prs}
+                      onSelect={selectPr}
+                      onRun={runReviewPlan}
+                      running={runningReviewPlan}
+                      error={reviewPlanError}
+                    />
                     <section className="surface rounded-lg p-4 sm:p-5">
                       <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
                         <div>
@@ -205,6 +229,7 @@ export default function App() {
                       selected={selectedPr}
                       onSelect={selectPr}
                       floodPrNumbers={floodPrNumbers}
+                      ai={data.ai}
                       pageMode
                     />
                   </div>
@@ -245,6 +270,10 @@ export default function App() {
       <PrDetail
         key={selectedPr?.number ?? 'empty'}
         pr={selectedPr}
+        prs={data?.prs}
+        clusters={clusters}
+        ai={data?.ai}
+        onRunAi={runAiAction}
         onClose={() => setSelectedPrState(null)}
       />
 

@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Search, SlidersHorizontal } from 'lucide-react'
-import type { PullRequest } from '../types'
+import type { AiCache, PullRequest } from '../types'
 import { PrCard } from './PrCard'
 import { isTrustedCleanPr, sortPrs, type SortKey } from '../utils'
 
@@ -9,10 +9,11 @@ interface Props {
   selected: PullRequest | null
   onSelect: (pr: PullRequest) => void
   floodPrNumbers: Set<number>
+  ai?: AiCache
   pageMode?: boolean
 }
 
-export function PrList({ prs, selected, onSelect, floodPrNumbers, pageMode = false }: Props) {
+export function PrList({ prs, selected, onSelect, floodPrNumbers, ai, pageMode = false }: Props) {
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<SortKey>('newest')
   const [filter, setFilter] = useState<FilterKey>('all')
@@ -102,6 +103,8 @@ export function PrList({ prs, selected, onSelect, floodPrNumbers, pageMode = fal
             key={pr.number}
             pr={pr}
             selected={selected?.number === pr.number}
+            aiAlignment={ai?.alignment[String(pr.number)]}
+            aiExplain={ai?.explain[String(pr.number)]}
             onClick={() => onSelect(pr)}
           />
         ))}

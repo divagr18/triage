@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,50 @@ from typing import Any
 
 
 CACHE_ROOT = Path(".triage") / "cache"
+STOP_WORDS = {
+    "a",
+    "add",
+    "adds",
+    "an",
+    "and",
+    "for",
+    "from",
+    "in",
+    "of",
+    "on",
+    "the",
+    "to",
+    "update",
+    "updates",
+    "with",
+}
+DOC_NAMES = {"readme", "changelog", "changes", "contributing", "code_of_conduct", "license"}
+CONFIG_NAMES = {
+    ".github",
+    ".gitignore",
+    ".prettierrc",
+    ".eslintrc",
+    "dockerfile",
+    "makefile",
+    "pyproject.toml",
+    "setup.cfg",
+    "tox.ini",
+    "tsconfig.json",
+}
+LOCKFILE_NAMES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "cargo.lock", "go.sum"}
+DEPENDENCY_FILES = {
+    "package.json",
+    "pyproject.toml",
+    "requirements.txt",
+    "setup.py",
+    "setup.cfg",
+    "cargo.toml",
+    "go.mod",
+    "gemfile",
+}
+GENERATED_MARKERS = {"dist/", "build/", "vendor/", "generated/", "docs/_build/"}
+TEST_MARKERS = {"test", "tests", "__tests__", "spec", "specs"}
+CORE_MARKERS = {"src", "lib", "packages", "crates", "core", "internal"}
 PR_LIST_FIELDS = [
     "number",
     "title",
@@ -77,6 +122,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "scan":
             scan_command(args)
+        elif args.command == "report":
+            report_command(args)
         elif args.command == "cache-path":
             print(cache_path_for_repo(args.repo))
         else:
@@ -109,6 +156,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="max prior PRs to inspect per contributor",
     )
 
+    report = subcommands.add_parser("report", help="show deterministic signal summary from cache")
+    report.add_argument("repo", help="repository in owner/repo form")
+
     cache_path = subcommands.add_parser("cache-path", help="print cache file path for a repo")
     cache_path.add_argument("repo", help="repository in owner/repo form")
     return parser
@@ -136,11 +186,13 @@ def scan_command(args: argparse.Namespace) -> None:
 
     if scan_args.offline:
         data = read_cache(path)
+        attach_deterministic_signals(data)
         print_scan_summary(data, offline=True)
         return
 
     if path.exists() and not scan_args.refresh:
         data = read_cache(path)
+        attach_deterministic_signals(data)
         print(f"Using cached scan at {path}. Pass --refresh to call GitHub.")
         print_scan_summary(data, offline=True)
         return
@@ -150,6 +202,13 @@ def scan_command(args: argparse.Namespace) -> None:
     write_cache(path, data)
     print_scan_summary(data, offline=False)
     print(f"Cache: {path}")
+
+
+def report_command(args: argparse.Namespace) -> None:
+    validate_repo(args.repo)
+    data = read_cache(cache_path_for_repo(args.repo))
+    attach_deterministic_signals(data)
+    print_signal_report(data)
 
 
 def scan_github(args: ScanArgs) -> dict[str, Any]:
@@ -183,8 +242,8 @@ def scan_github(args: ScanArgs) -> dict[str, Any]:
         }
         normalized_prs.append(normalized)
 
-    return {
-        "schemaVersion": 1,
+    data = {
+        "schemaVersion": 2,
         "tool": "triage",
         "repo": args.repo,
         "state": args.state,
@@ -194,6 +253,8 @@ def scan_github(args: ScanArgs) -> dict[str, Any]:
         "source": "gh",
         "prs": normalized_prs,
     }
+    attach_deterministic_signals(data)
+    return data
 
 
 def fetch_pr_list(args: ScanArgs) -> list[dict[str, Any]]:
@@ -364,6 +425,298 @@ def empty_contributor_history(login: str) -> dict[str, Any]:
     }
 
 
+def attach_deterministic_signals(data: dict[str, Any]) -> None:
+    prs = data.get("prs") or []
+    for pr in prs:
+        if isinstance(pr, dict):
+            pr["signals"] = compute_pr_signals(pr)
+            pr["flags"] = compute_pr_flags(pr)
+    data["signalSummary"] = compute_signal_summary(prs)
+
+
+def compute_pr_signals(pr: dict[str, Any]) -> dict[str, Any]:
+    files = [file for file in pr.get("files", []) if isinstance(file, dict)]
+    buckets = {bucket: 0 for bucket in ["code", "tests", "docs", "config", "lockfile", "generated", "other"]}
+    touched_modules: set[str] = set()
+    file_names: list[str] = []
+    changed_lines: list[str] = []
+    added_lines: list[str] = []
+    removed_lines: list[str] = []
+
+    for file in files:
+        filename = file.get("filename") or ""
+        file_names.append(filename)
+        buckets[classify_file_bucket(filename)] += 1
+        module = top_level_module(filename)
+        if module:
+            touched_modules.add(module)
+        patch_lines = parse_patch_changed_lines(file.get("patch") or "")
+        changed_lines.extend(patch_lines["changed"])
+        added_lines.extend(patch_lines["added"])
+        removed_lines.extend(patch_lines["removed"])
+
+    total_changes = int_or_zero(pr.get("additions")) + int_or_zero(pr.get("deletions"))
+    text = f"{pr.get('title', '')}\n{pr.get('body', '')}"
+    checks = [check for check in pr.get("checks", []) if isinstance(check, dict)]
+    reviews = [review for review in pr.get("reviews", []) if isinstance(review, dict)]
+    contributor = pr.get("contributor") if isinstance(pr.get("contributor"), dict) else {}
+    return {
+        "fileBuckets": buckets,
+        "touchedModules": sorted(touched_modules),
+        "fileNames": file_names,
+        "keywords": extract_keywords(text),
+        "hasTests": buckets["tests"] > 0,
+        "hasCode": buckets["code"] > 0,
+        "docsOnly": buckets["docs"] > 0 and sum(v for k, v in buckets.items() if k != "docs") == 0,
+        "readmeOnly": is_readme_only(file_names),
+        "lockfileOnly": buckets["lockfile"] > 0 and sum(v for k, v in buckets.items() if k != "lockfile") == 0,
+        "configOnly": buckets["config"] > 0 and sum(v for k, v in buckets.items() if k != "config") == 0,
+        "dependencyFilesChanged": [name for name in file_names if is_dependency_file(name)],
+        "generatedFilesChanged": buckets["generated"],
+        "coreFilesChanged": [name for name in file_names if is_core_file(name)],
+        "addedLines": len(added_lines),
+        "removedLines": len(removed_lines),
+        "totalChanges": total_changes,
+        "addDeleteRatio": round(int_or_zero(pr.get("additions")) / max(1, int_or_zero(pr.get("deletions"))), 2),
+        "commentOnly": bool(changed_lines) and all(is_comment_or_blank(line) for line in changed_lines),
+        "formattingChurn": looks_like_formatting_churn(added_lines, removed_lines),
+        "descriptionLength": len((pr.get("body") or "").strip()),
+        "titleLength": len((pr.get("title") or "").strip()),
+        "genericDescription": is_generic_description(pr.get("title") or "", pr.get("body") or ""),
+        "ciState": classify_ci_state(checks),
+        "reviewState": classify_review_state(pr, reviews),
+        "authorPriorMergedPrs": int_or_zero(contributor.get("priorMergedPrs")),
+        "authorCurrentOpenPrs": int_or_zero(contributor.get("currentOpenPrs")),
+        "authorOpenPrsInScan": int_or_zero(contributor.get("currentOpenPrsInScan")),
+        "authorAssociation": contributor.get("accountAssociation"),
+        "isNewContributor": is_new_contributor(contributor),
+        "largeDiff": total_changes >= 500 or int_or_zero(pr.get("changedFiles")) >= 20,
+        "smallDiff": total_changes <= 30 and int_or_zero(pr.get("changedFiles")) <= 3,
+    }
+
+
+def compute_pr_flags(pr: dict[str, Any]) -> list[str]:
+    signals = pr.get("signals") or {}
+    flags: list[str] = []
+
+    if signals.get("readmeOnly"):
+        flags.append("readme_only_noise")
+    if signals.get("docsOnly") and signals.get("genericDescription"):
+        flags.append("docs_rewrite_noise")
+    if signals.get("dependencyFilesChanged") and not signals.get("hasCode"):
+        flags.append("dependency_without_usage")
+    if signals.get("lockfileOnly"):
+        flags.append("lockfile_only")
+    if signals.get("formattingChurn"):
+        flags.append("formatting_churn")
+    if signals.get("coreFilesChanged") and not signals.get("hasTests"):
+        flags.append("core_change_without_tests")
+    if signals.get("largeDiff") and len(signals.get("touchedModules") or []) >= 4:
+        flags.append("large_unrelated_refactor")
+    if signals.get("hasTests") and not signals.get("hasCode") and signals.get("genericDescription"):
+        flags.append("test_only_mock_inflation")
+    if signals.get("genericDescription"):
+        flags.append("description_too_generic")
+    if signals.get("ciState") == "failing":
+        flags.append("ci_failing")
+    if signals.get("reviewState") == "none":
+        flags.append("no_human_review")
+    if signals.get("isNewContributor") and (signals.get("largeDiff") or signals.get("coreFilesChanged")):
+        flags.append("new_contributor_high_risk")
+    if (
+        signals.get("isNewContributor")
+        and signals.get("smallDiff")
+        and (signals.get("docsOnly") or signals.get("genericDescription"))
+    ):
+        flags.append("possible_ai_flood_member")
+
+    return flags
+
+
+def compute_signal_summary(prs: list[Any]) -> dict[str, Any]:
+    flag_counts: dict[str, int] = {}
+    bucket_counts: dict[str, int] = {}
+    risky_new_contributors = 0
+    low_value = 0
+
+    for pr in prs:
+        if not isinstance(pr, dict):
+            continue
+        flags = pr.get("flags") or []
+        for flag in flags:
+            flag_counts[flag] = flag_counts.get(flag, 0) + 1
+        buckets = ((pr.get("signals") or {}).get("fileBuckets") or {})
+        for bucket, count in buckets.items():
+            bucket_counts[bucket] = bucket_counts.get(bucket, 0) + int_or_zero(count)
+        if "new_contributor_high_risk" in flags:
+            risky_new_contributors += 1
+        if any(flag in flags for flag in LOW_VALUE_FLAGS):
+            low_value += 1
+
+    return {
+        "flagCounts": dict(sorted(flag_counts.items())),
+        "fileBucketCounts": dict(sorted(bucket_counts.items())),
+        "lowValuePrs": low_value,
+        "riskyNewContributorPrs": risky_new_contributors,
+    }
+
+
+LOW_VALUE_FLAGS = {
+    "readme_only_noise",
+    "docs_rewrite_noise",
+    "dependency_without_usage",
+    "lockfile_only",
+    "formatting_churn",
+    "description_too_generic",
+}
+
+
+def classify_file_bucket(filename: str) -> str:
+    normalized = normalize_path(filename)
+    name = Path(normalized).name.lower()
+    stem = Path(name).stem.lower()
+    suffix = Path(name).suffix.lower()
+
+    if any(normalized.startswith(marker) or f"/{marker}" in normalized for marker in GENERATED_MARKERS):
+        return "generated"
+    if name in LOCKFILE_NAMES:
+        return "lockfile"
+    if is_test_file(normalized):
+        return "tests"
+    if stem in DOC_NAMES or suffix in {".md", ".mdx", ".rst", ".txt", ".adoc"}:
+        return "docs"
+    if name in CONFIG_NAMES or normalized.startswith(".github/") or suffix in {".yml", ".yaml", ".toml", ".ini", ".json"}:
+        return "config"
+    if suffix in {".py", ".js", ".jsx", ".ts", ".tsx", ".rs", ".go", ".java", ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".rb"}:
+        return "code"
+    return "other"
+
+
+def normalize_path(filename: str) -> str:
+    return filename.replace("\\", "/").strip().lower()
+
+
+def top_level_module(filename: str) -> str:
+    normalized = normalize_path(filename)
+    parts = [part for part in normalized.split("/") if part]
+    if not parts:
+        return ""
+    if parts[0] in {".github", "docs", "test", "tests", "src", "lib", "packages", "crates"} and len(parts) > 1:
+        return "/".join(parts[:2])
+    return parts[0]
+
+
+def is_test_file(filename: str) -> bool:
+    parts = normalize_path(filename).split("/")
+    name = parts[-1] if parts else ""
+    return any(part in TEST_MARKERS for part in parts) or bool(re.search(r"(\.test|\.spec|_test)\.", name))
+
+
+def is_readme_only(file_names: list[str]) -> bool:
+    return bool(file_names) and all(Path(normalize_path(name)).stem == "readme" for name in file_names)
+
+
+def is_dependency_file(filename: str) -> bool:
+    name = Path(normalize_path(filename)).name
+    return name in DEPENDENCY_FILES or name in LOCKFILE_NAMES
+
+
+def is_core_file(filename: str) -> bool:
+    parts = normalize_path(filename).split("/")
+    return any(part in CORE_MARKERS for part in parts) and not is_test_file(filename)
+
+
+def parse_patch_changed_lines(patch: str) -> dict[str, list[str]]:
+    added: list[str] = []
+    removed: list[str] = []
+    for line in patch.splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            added.append(line[1:])
+        elif line.startswith("-"):
+            removed.append(line[1:])
+    return {"added": added, "removed": removed, "changed": [*added, *removed]}
+
+
+def is_comment_or_blank(line: str) -> bool:
+    stripped = line.strip()
+    return not stripped or stripped.startswith(("#", "//", "/*", "*", "--")) or stripped.endswith("*/")
+
+
+def looks_like_formatting_churn(added_lines: list[str], removed_lines: list[str]) -> bool:
+    if not added_lines or not removed_lines:
+        return False
+    added_tokens = sorted(normalize_code_line(line) for line in added_lines if normalize_code_line(line))
+    removed_tokens = sorted(normalize_code_line(line) for line in removed_lines if normalize_code_line(line))
+    return bool(added_tokens) and added_tokens == removed_tokens
+
+
+def normalize_code_line(line: str) -> str:
+    return re.sub(r"\s+", "", line.strip())
+
+
+def extract_keywords(text: str, limit: int = 12) -> list[str]:
+    words = re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", text.lower())
+    counts: dict[str, int] = {}
+    for word in words:
+        if word in STOP_WORDS:
+            continue
+        counts[word] = counts.get(word, 0) + 1
+    return [word for word, _ in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]]
+
+
+def is_generic_description(title: str, body: str) -> bool:
+    combined = f"{title}\n{body}".strip().lower()
+    body_length = len(body.strip())
+    generic_phrases = [
+        "fix typo",
+        "minor changes",
+        "update readme",
+        "improve documentation",
+        "small fix",
+        "cleanup",
+        "refactor code",
+        "fix bug",
+    ]
+    return body_length < 40 or any(phrase in combined for phrase in generic_phrases)
+
+
+def classify_ci_state(checks: list[dict[str, Any]]) -> str:
+    if not checks:
+        return "none"
+    conclusions = {str(check.get("conclusion") or "").lower() for check in checks}
+    statuses = {str(check.get("status") or "").lower() for check in checks}
+    if {"failure", "timed_out", "cancelled", "action_required"} & conclusions:
+        return "failing"
+    if "pending" in statuses or "in_progress" in statuses or not all(conclusions):
+        return "pending"
+    if conclusions <= {"success", "skipped", "neutral"}:
+        return "passing"
+    return "unknown"
+
+
+def classify_review_state(pr: dict[str, Any], reviews: list[dict[str, Any]]) -> str:
+    decision = str(pr.get("reviewDecision") or "").lower()
+    if decision:
+        return decision
+    states = {str(review.get("state") or "").lower() for review in reviews}
+    if "changes_requested" in states:
+        return "changes_requested"
+    if "approved" in states:
+        return "approved"
+    if reviews:
+        return "reviewed"
+    return "none"
+
+
+def is_new_contributor(contributor: dict[str, Any]) -> bool:
+    association = str(contributor.get("accountAssociation") or "").upper()
+    if association in {"MEMBER", "OWNER", "COLLABORATOR"}:
+        return False
+    return int_or_zero(contributor.get("priorMergedPrs")) == 0
+
+
 def run_gh_json(command: list[str]) -> Any:
     result = subprocess.run(command, text=True, capture_output=True)
     if result.returncode != 0:
@@ -394,14 +747,51 @@ def print_scan_summary(data: dict[str, Any], *, offline: bool) -> None:
     prs = data.get("prs") or []
     contributors = {((pr.get("author") or {}).get("login")) for pr in prs if isinstance(pr, dict)}
     files = sum(len(pr.get("files") or []) for pr in prs if isinstance(pr, dict))
+    summary = data.get("signalSummary") or {}
     mode = "offline cache" if offline else "GitHub"
     print(f"Scanned {len(prs)} PRs from {data.get('repo', 'unknown')} via {mode}.")
     print(f"Contributors: {len([c for c in contributors if c])}")
     print(f"Files with patches: {files}")
+    if summary:
+        print(f"Low-value PRs flagged: {summary.get('lowValuePrs', 0)}")
+        print(f"Risky new-contributor PRs: {summary.get('riskyNewContributorPrs', 0)}")
     if data.get("since"):
         print(f"Since: {data['since']}")
     if data.get("scannedAt"):
         print(f"Scanned at: {data['scannedAt']}")
+
+
+def print_signal_report(data: dict[str, Any]) -> None:
+    prs = [pr for pr in data.get("prs", []) if isinstance(pr, dict)]
+    summary = data.get("signalSummary") or {}
+    print("Deterministic Signal Report")
+    print("---------------------------")
+    print(f"Repo: {data.get('repo', 'unknown')}")
+    print(f"PRs: {len(prs)}")
+    print(f"Low-value PRs flagged: {summary.get('lowValuePrs', 0)}")
+    print(f"Risky new-contributor PRs: {summary.get('riskyNewContributorPrs', 0)}")
+    print()
+
+    flag_counts = summary.get("flagCounts") or {}
+    if flag_counts:
+        print("Flags:")
+        for flag, count in sorted(flag_counts.items(), key=lambda item: (-item[1], item[0])):
+            print(f"- {flag}: {count}")
+        print()
+
+    bucket_counts = summary.get("fileBucketCounts") or {}
+    if bucket_counts:
+        print("File buckets:")
+        for bucket, count in sorted(bucket_counts.items()):
+            print(f"- {bucket}: {count}")
+        print()
+
+    flagged = [pr for pr in prs if pr.get("flags")]
+    if flagged:
+        print("Flagged PRs:")
+        for pr in flagged[:20]:
+            flags = ", ".join(pr.get("flags") or [])
+            print(f"- #{pr.get('number')} {pr.get('title')}: {flags}")
 
 
 def validate_repo(repo: str) -> None:

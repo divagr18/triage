@@ -74,6 +74,93 @@ class PhaseOneTests(unittest.TestCase):
 
         self.assertEqual(urls, ["https://example.test/1", "https://example.test/2"])
 
+    def test_deterministic_signals_flag_readme_noise(self):
+        pr = {
+            "title": "Update README",
+            "body": "small update",
+            "author": {"login": "newdev"},
+            "additions": 3,
+            "deletions": 1,
+            "changedFiles": 1,
+            "checks": [],
+            "reviews": [],
+            "files": [
+                {
+                    "filename": "README.md",
+                    "status": "modified",
+                    "additions": 3,
+                    "deletions": 1,
+                    "changes": 4,
+                    "patch": "@@\n-old docs\n+new docs",
+                }
+            ],
+            "contributor": {"priorMergedPrs": 0, "currentOpenPrs": 1, "currentOpenPrsInScan": 1},
+        }
+
+        signals = triage.compute_pr_signals(pr)
+        pr["signals"] = signals
+        flags = triage.compute_pr_flags(pr)
+
+        self.assertTrue(signals["docsOnly"])
+        self.assertTrue(signals["readmeOnly"])
+        self.assertIn("readme_only_noise", flags)
+        self.assertIn("description_too_generic", flags)
+
+    def test_deterministic_signals_flag_core_without_tests(self):
+        pr = {
+            "title": "Change parser behavior",
+            "body": "Updates parser handling for malformed input.",
+            "additions": 80,
+            "deletions": 10,
+            "changedFiles": 1,
+            "checks": [{"name": "ci", "conclusion": "FAILURE"}],
+            "reviews": [],
+            "files": [
+                {
+                    "filename": "src/parser.js",
+                    "status": "modified",
+                    "additions": 80,
+                    "deletions": 10,
+                    "changes": 90,
+                    "patch": "@@\n-if (x) return old\n+if (x) return newer",
+                }
+            ],
+            "contributor": {"priorMergedPrs": 0, "currentOpenPrs": 1, "currentOpenPrsInScan": 1},
+        }
+
+        signals = triage.compute_pr_signals(pr)
+        pr["signals"] = signals
+        flags = triage.compute_pr_flags(pr)
+
+        self.assertTrue(signals["hasCode"])
+        self.assertFalse(signals["hasTests"])
+        self.assertEqual(signals["ciState"], "failing")
+        self.assertIn("core_change_without_tests", flags)
+        self.assertIn("ci_failing", flags)
+        self.assertIn("new_contributor_high_risk", flags)
+
+    def test_attach_deterministic_signals_adds_summary(self):
+        data = {
+            "repo": "owner/repo",
+            "prs": [
+                {
+                    "title": "Update README",
+                    "body": "",
+                    "additions": 1,
+                    "deletions": 0,
+                    "changedFiles": 1,
+                    "files": [{"filename": "README.md", "patch": "@@\n+hello"}],
+                    "contributor": {},
+                }
+            ],
+        }
+
+        triage.attach_deterministic_signals(data)
+
+        self.assertIn("signals", data["prs"][0])
+        self.assertIn("readme_only_noise", data["prs"][0]["flags"])
+        self.assertEqual(data["signalSummary"]["lowValuePrs"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

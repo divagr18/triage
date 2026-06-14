@@ -155,6 +155,40 @@ Changelet examples:
 - `rename option`
 - `change error message`
 
+### Phase 4.5: PR Fingerprints And Slice Context
+
+Upgrade changelets into a compact PR fingerprint so later ML and Codex calls reason over program transformations instead of raw PR text.
+
+Fingerprint fields:
+
+- semantic changelets
+- changed-path topology
+- local patch slices around changed lines
+- behavior-delta hints
+- test realism hints
+- dependency/config mutation features
+- patch-text alignment score
+- contributor trust and review state
+- accepted/rejected motif similarity when history is available
+
+Slice context:
+
+- changed line
+- nearby function/class signature when present in patch
+- variables/API calls visible in hunk context
+- affected return/error/control-flow hints
+- nearby test/assertion lines
+- direct changed dependency/config keys
+
+Default rule:
+
+```text
+Do not cluster PRs.
+Cluster program transformations.
+```
+
+Use deterministic fingerprints first. Use Codex only for deep repo-aware reasoning on selected PRs, comparisons, and maintainer action recommendations.
+
 ### Phase 5: Duplicate Clustering
 
 Cluster PRs by meaning, not just titles.
@@ -318,6 +352,13 @@ Implementation options:
 - Fast version: LLM judge with structured JSON.
 - Better version: embedding similarity between `claimed_intent` and `actual_changelets`.
 - Best version: both, with explanation.
+
+Implementation split:
+
+- Use OpenAI Responses API with low reasoning for cached patch-text alignment.
+- Use Codex SDK/CLI for deeper `triage explain`, `triage compare`, and `triage recommend` actions where code-aware engineering judgment matters.
+- Cache every AI output under `.triage/cache/{owner}_{repo}/ai/`.
+- Never silently replace a failed Codex call with a fake deterministic result.
 
 ### Phase 10: Vision Alignment
 

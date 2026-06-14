@@ -18,6 +18,9 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +30,9 @@ from typing import Any
 CACHE_ROOT = Path(".triage") / "cache"
 SCHEMA_VERSION = 4
 DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+DEFAULT_REASONING_MODEL = "gpt-5.4"
+DEFAULT_CODEX_MODEL = "gpt-5.4"
+OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 STOP_WORDS = {
     "a",
     "add",
@@ -104,6 +110,155 @@ SEARCH_FIELDS = [
     "url",
 ]
 
+FINGERPRINTING_GUIDANCE = {
+    "principle": "Cluster and judge program transformations, not raw PR text.",
+    "signals": [
+        "semantic changelets",
+        "patch-text alignment",
+        "behavior delta",
+        "test realism",
+        "changed-path topology",
+        "dependency/config mutation",
+        "maintainer action cost",
+    ],
+    "canonical_rule": "Prefer the PR that captures the useful shared transformation with the least unrelated change mass.",
+}
+
+PATCH_TEXT_ALIGNMENT_SCHEMA = {
+    "name": "patch_text_alignment",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "pr": {"type": "integer"},
+            "alignmentScore": {"type": "number"},
+            "verdict": {"type": "string", "enum": ["aligned", "partial", "mismatch", "unclear"]},
+            "claimedIntent": {"type": "string"},
+            "actualChange": {"type": "string"},
+            "mismatches": {"type": "array", "items": {"type": "string"}},
+            "evidence": {"type": "array", "items": {"type": "string"}},
+            "confidence": {"type": "number"},
+        },
+        "required": [
+            "pr",
+            "alignmentScore",
+            "verdict",
+            "claimedIntent",
+            "actualChange",
+            "mismatches",
+            "evidence",
+            "confidence",
+        ],
+        "additionalProperties": False,
+    },
+}
+
+CODEX_EXPLAIN_SCHEMA = {
+    "name": "codex_pr_explain",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "pr": {"type": "integer"},
+            "summary": {"type": "string"},
+            "actualChange": {"type": "string"},
+            "patchTextAlignment": {"type": "string", "enum": ["aligned", "partial", "mismatch", "unclear"]},
+            "riskLevel": {"type": "string", "enum": ["low", "medium", "high"]},
+            "recommendedAction": {
+                "type": "string",
+                "enum": ["review_first", "needs_info", "duplicate", "probably_junk", "risky_but_maybe_valuable", "safe_to_ignore_for_now"],
+            },
+            "reasons": {"type": "array", "items": {"type": "string"}},
+            "risks": {"type": "array", "items": {"type": "string"}},
+            "questionsForMaintainer": {"type": "array", "items": {"type": "string"}},
+            "confidence": {"type": "number"},
+        },
+        "required": [
+            "pr",
+            "summary",
+            "actualChange",
+            "patchTextAlignment",
+            "riskLevel",
+            "recommendedAction",
+            "reasons",
+            "risks",
+            "questionsForMaintainer",
+            "confidence",
+        ],
+        "additionalProperties": False,
+    },
+}
+
+CODEX_COMPARE_SCHEMA = {
+    "name": "codex_pr_compare",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "leftPr": {"type": "integer"},
+            "rightPr": {"type": "integer"},
+            "sameIntent": {"type": "boolean"},
+            "betterReviewCandidate": {"type": "integer"},
+            "canonicalRationale": {"type": "string"},
+            "leftStrengths": {"type": "array", "items": {"type": "string"}},
+            "rightStrengths": {"type": "array", "items": {"type": "string"}},
+            "leftRisks": {"type": "array", "items": {"type": "string"}},
+            "rightRisks": {"type": "array", "items": {"type": "string"}},
+            "suggestedAction": {"type": "string"},
+            "confidence": {"type": "number"},
+        },
+        "required": [
+            "leftPr",
+            "rightPr",
+            "sameIntent",
+            "betterReviewCandidate",
+            "canonicalRationale",
+            "leftStrengths",
+            "rightStrengths",
+            "leftRisks",
+            "rightRisks",
+            "suggestedAction",
+            "confidence",
+        ],
+        "additionalProperties": False,
+    },
+}
+
+CODEX_RECOMMEND_SCHEMA = {
+    "name": "codex_action_recommendations",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "recommendations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "pr": {"type": "integer"},
+                        "action": {
+                            "type": "string",
+                            "enum": [
+                                "review_first",
+                                "needs_info",
+                                "duplicate",
+                                "probably_junk",
+                                "risky_but_maybe_valuable",
+                                "safe_to_ignore_for_now",
+                            ],
+                        },
+                        "priority": {"type": "integer"},
+                        "reason": {"type": "string"},
+                        "risks": {"type": "array", "items": {"type": "string"}},
+                        "confidence": {"type": "number"},
+                    },
+                    "required": ["pr", "action", "priority", "reason", "risks", "confidence"],
+                    "additionalProperties": False,
+                },
+            },
+            "summary": {"type": "string"},
+        },
+        "required": ["recommendations", "summary"],
+        "additionalProperties": False,
+    },
+}
+
 
 class TriageError(RuntimeError):
     pass
@@ -135,6 +290,14 @@ def main(argv: list[str] | None = None) -> int:
             clusters_command(args)
         elif args.command == "flood":
             flood_command(args)
+        elif args.command == "align":
+            align_command(args)
+        elif args.command == "explain":
+            explain_command(args)
+        elif args.command == "compare":
+            compare_command(args)
+        elif args.command == "recommend":
+            recommend_command(args)
         elif args.command == "cache-path":
             print(cache_path_for_repo(args.repo))
         else:
@@ -197,6 +360,31 @@ def build_parser() -> argparse.ArgumentParser:
     flood.add_argument("--limit", type=positive_int, default=20)
     flood.add_argument("--model", default=DEFAULT_EMBEDDING_MODEL)
     flood.add_argument("--refresh-embeddings", action="store_true")
+
+    align = subcommands.add_parser("align", help="judge patch-text alignment for a PR via Responses API")
+    align.add_argument("repo", help="repository in owner/repo form")
+    align.add_argument("pr", type=positive_int, help="pull request number")
+    align.add_argument("--model", default=DEFAULT_REASONING_MODEL)
+    align.add_argument("--refresh-ai", action="store_true")
+
+    explain = subcommands.add_parser("explain", help="explain a PR and recommend maintainer action via Codex")
+    explain.add_argument("repo", help="repository in owner/repo form")
+    explain.add_argument("pr", type=positive_int, help="pull request number")
+    explain.add_argument("--model", default=DEFAULT_CODEX_MODEL)
+    explain.add_argument("--refresh-ai", action="store_true")
+
+    compare = subcommands.add_parser("compare", help="compare two PRs with Codex reasoning")
+    compare.add_argument("repo", help="repository in owner/repo form")
+    compare.add_argument("left", type=positive_int, help="first pull request number")
+    compare.add_argument("right", type=positive_int, help="second pull request number")
+    compare.add_argument("--model", default=DEFAULT_CODEX_MODEL)
+    compare.add_argument("--refresh-ai", action="store_true")
+
+    recommend = subcommands.add_parser("recommend", help="recommend maintainer actions for risky PRs via Codex")
+    recommend.add_argument("repo", help="repository in owner/repo form")
+    recommend.add_argument("--limit", type=positive_int, default=5)
+    recommend.add_argument("--model", default=DEFAULT_CODEX_MODEL)
+    recommend.add_argument("--refresh-ai", action="store_true")
 
     cache_path = subcommands.add_parser("cache-path", help="print cache file path for a repo")
     cache_path.add_argument("repo", help="repository in owner/repo form")
@@ -289,6 +477,70 @@ def flood_command(args: argparse.Namespace) -> None:
     )
     data["floodWaves"] = waves
     print_flood_waves(data, waves, limit=args.limit)
+
+
+def align_command(args: argparse.Namespace) -> None:
+    validate_repo(args.repo)
+    data = read_cache(cache_path_for_repo(args.repo))
+    attach_deterministic_signals(data)
+    pr = find_pr(data, args.pr)
+    result = cached_ai_result(
+        args.repo,
+        "alignment",
+        alignment_cache_key(pr, args.model),
+        refresh=args.refresh_ai,
+        compute=lambda: run_patch_text_alignment(pr, model=args.model),
+    )
+    print_json_result("Patch-Text Alignment", result)
+
+
+def explain_command(args: argparse.Namespace) -> None:
+    validate_repo(args.repo)
+    data = read_cache(cache_path_for_repo(args.repo))
+    attach_deterministic_signals(data)
+    pr = find_pr(data, args.pr)
+    result = cached_ai_result(
+        args.repo,
+        "codex_explain",
+        codex_cache_key("explain", [pr], args.model),
+        refresh=args.refresh_ai,
+        compute=lambda: run_codex_explain(args.repo, pr, model=args.model),
+    )
+    print_json_result("Codex PR Explain", result)
+
+
+def compare_command(args: argparse.Namespace) -> None:
+    validate_repo(args.repo)
+    data = read_cache(cache_path_for_repo(args.repo))
+    attach_deterministic_signals(data)
+    left = find_pr(data, args.left)
+    right = find_pr(data, args.right)
+    result = cached_ai_result(
+        args.repo,
+        "codex_compare",
+        codex_cache_key("compare", [left, right], args.model),
+        refresh=args.refresh_ai,
+        compute=lambda: run_codex_compare(args.repo, left, right, model=args.model),
+    )
+    print_json_result("Codex PR Compare", result)
+
+
+def recommend_command(args: argparse.Namespace) -> None:
+    validate_repo(args.repo)
+    data = read_cache(cache_path_for_repo(args.repo))
+    attach_deterministic_signals(data)
+    prs = select_recommendation_candidates(data, limit=args.limit)
+    if not prs:
+        print("No recommendation candidates found.")
+        return
+    result = cached_ai_result(
+        args.repo,
+        "codex_recommend",
+        codex_cache_key("recommend", prs, args.model),
+        refresh=args.refresh_ai,
+        compute=lambda: run_codex_recommend(args.repo, prs, model=args.model),
+    )
+    print_json_result("Codex Action Recommendations", result)
 
 
 def scan_github(args: ScanArgs) -> dict[str, Any]:
@@ -1926,6 +2178,390 @@ def build_trust_explanation(score: int, positives: list[str], risks: list[str]) 
     if risks:
         return f"{score}/100: {risks[0]}."
     return f"{score}/100: limited contributor signal available."
+
+
+def run_patch_text_alignment(pr: dict[str, Any], *, model: str) -> dict[str, Any]:
+    prompt = {
+        "task": "Judge whether the pull request text matches the actual patch.",
+        "pull_request": pr_context(pr),
+        "output_rules": [
+            "Be strict about title/body claims that are not supported by changed files or patch summary.",
+            "Do not judge author intent or morality.",
+            "Return JSON only matching the schema.",
+        ],
+    }
+    return run_responses_json(
+        model=model,
+        schema=PATCH_TEXT_ALIGNMENT_SCHEMA,
+        input_text=json.dumps(prompt, indent=2, sort_keys=True),
+    )
+
+
+def run_codex_explain(repo: str, pr: dict[str, Any], *, model: str) -> dict[str, Any]:
+    prompt = {
+        "task": "Explain this pull request for an open-source maintainer and recommend the next action.",
+        "repo": repo,
+        "pull_request": pr_context(pr),
+        "fingerprinting_guidance": FINGERPRINTING_GUIDANCE,
+        "output_rules": [
+            "Use repository-maintainer triage framing.",
+            "Focus on patch-text alignment, behavior delta, tests, risk, and maintainer action.",
+            "Return JSON only matching the schema.",
+        ],
+    }
+    return run_codex_json(
+        prompt=json.dumps(prompt, indent=2, sort_keys=True),
+        schema=CODEX_EXPLAIN_SCHEMA,
+        model=model,
+    )
+
+
+def run_codex_compare(repo: str, left: dict[str, Any], right: dict[str, Any], *, model: str) -> dict[str, Any]:
+    prompt = {
+        "task": "Compare two pull requests and identify the better maintainer review target.",
+        "repo": repo,
+        "pull_requests": [pr_context(left), pr_context(right)],
+        "fingerprinting_guidance": FINGERPRINTING_GUIDANCE,
+        "output_rules": [
+            "Prefer the PR that captures the useful shared transformation with less unrelated change mass.",
+            "If they are not duplicates, say so clearly.",
+            "Return JSON only matching the schema.",
+        ],
+    }
+    return run_codex_json(
+        prompt=json.dumps(prompt, indent=2, sort_keys=True),
+        schema=CODEX_COMPARE_SCHEMA,
+        model=model,
+    )
+
+
+def run_codex_recommend(repo: str, prs: list[dict[str, Any]], *, model: str) -> dict[str, Any]:
+    prompt = {
+        "task": "Recommend maintainer actions for these risky or attention-worthy pull requests.",
+        "repo": repo,
+        "pull_requests": [pr_context(pr) for pr in prs],
+        "fingerprinting_guidance": FINGERPRINTING_GUIDANCE,
+        "allowed_actions": [
+            "review_first",
+            "needs_info",
+            "duplicate",
+            "probably_junk",
+            "risky_but_maybe_valuable",
+            "safe_to_ignore_for_now",
+        ],
+        "output_rules": [
+            "Use contributor trust only as prioritization context, never as an automatic rejection reason.",
+            "Be conservative: recommend human review for risky valuable code changes.",
+            "Return JSON only matching the schema.",
+        ],
+    }
+    return run_codex_json(
+        prompt=json.dumps(prompt, indent=2, sort_keys=True),
+        schema=CODEX_RECOMMEND_SCHEMA,
+        model=model,
+    )
+
+
+def run_responses_json(*, model: str, schema: dict[str, Any], input_text: str) -> dict[str, Any]:
+    env = load_dotenv()
+    api_key = env.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise TriageError("OPENAI_API_KEY is required in .env or environment for Responses API analysis")
+    body = {
+        "model": model,
+        "reasoning": {"effort": "low"},
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": input_text}],
+            }
+        ],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": schema["name"],
+                "schema": schema["schema"],
+                "strict": True,
+            }
+        },
+    }
+    request = urllib.request.Request(
+        OPENAI_RESPONSES_URL,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            raw = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise TriageError(f"Responses API failed with HTTP {error.code}: {detail}") from error
+    except urllib.error.URLError as error:
+        raise TriageError(f"Responses API request failed: {error.reason}") from error
+    text = extract_response_text(raw)
+    return parse_json_object(text, "Responses API")
+
+
+def run_codex_json(*, prompt: str, schema: dict[str, Any], model: str) -> dict[str, Any]:
+    errors: list[str] = []
+    try:
+        return run_codex_sdk_json(prompt=prompt, schema=schema, model=model)
+    except Exception as error:  # noqa: BLE001 - surface SDK failure and try CLI.
+        errors.append(f"SDK: {error}")
+    try:
+        return run_codex_cli_json(prompt=prompt, schema=schema, model=model)
+    except Exception as error:  # noqa: BLE001 - both Codex paths should be reported.
+        errors.append(f"CLI: {error}")
+    raise TriageError("Codex analysis failed; " + " | ".join(errors))
+
+
+def run_codex_sdk_json(*, prompt: str, schema: dict[str, Any], model: str) -> dict[str, Any]:
+    env = load_dotenv()
+    if env.get("OPENAI_API_KEY"):
+        os.environ.setdefault("OPENAI_API_KEY", env["OPENAI_API_KEY"])
+        os.environ.setdefault("CODEX_API_KEY", env["OPENAI_API_KEY"])
+    codex_env = os.environ.copy()
+    codex_env["CODEX_HOME"] = str(local_codex_home())
+    if env.get("OPENAI_API_KEY"):
+        codex_env.setdefault("OPENAI_API_KEY", env["OPENAI_API_KEY"])
+        codex_env.setdefault("CODEX_API_KEY", env["OPENAI_API_KEY"])
+    try:
+        from openai_codex import Codex, CodexConfig, Sandbox  # type: ignore
+    except ImportError as error:
+        raise TriageError("openai-codex SDK is not installed") from error
+    with Codex(CodexConfig(cwd=str(Path.cwd()), env=codex_env)) as codex:
+        if env.get("OPENAI_API_KEY"):
+            codex.login_api_key(env["OPENAI_API_KEY"])
+        thread = codex.thread_start(model=model, sandbox=Sandbox.read_only)
+        result = thread.run(codex_prompt_with_schema(prompt, schema))
+    final = getattr(result, "final_response", None) or str(result)
+    parsed = parse_json_object(final, "Codex SDK")
+    parsed["_provider"] = "codex_sdk"
+    return parsed
+
+
+def run_codex_cli_json(*, prompt: str, schema: dict[str, Any], model: str) -> dict[str, Any]:
+    if shutil.which("codex") is None:
+        raise TriageError("codex CLI is not on PATH")
+    env = os.environ.copy()
+    dotenv = load_dotenv()
+    env["CODEX_HOME"] = str(local_codex_home())
+    if dotenv.get("OPENAI_API_KEY"):
+        env.setdefault("OPENAI_API_KEY", dotenv["OPENAI_API_KEY"])
+        env.setdefault("CODEX_API_KEY", dotenv["OPENAI_API_KEY"])
+    with tempfile.TemporaryDirectory() as directory:
+        schema_path = Path(directory) / "schema.json"
+        output_path = Path(directory) / "codex-output.json"
+        schema_path.write_text(json.dumps(schema["schema"], indent=2), encoding="utf-8")
+        command = [
+            "codex",
+            "exec",
+            "--sandbox",
+            "read-only",
+            "--model",
+            model,
+            "--output-schema",
+            str(schema_path),
+            "-o",
+            str(output_path),
+            codex_prompt_with_schema(prompt, schema),
+        ]
+        result = subprocess.run(command, text=True, capture_output=True, encoding="utf-8", errors="replace", env=env)
+        if result.returncode != 0:
+            message = result.stderr.strip() or result.stdout.strip() or "unknown codex CLI error"
+            raise TriageError(message)
+        text = output_path.read_text(encoding="utf-8") if output_path.exists() else result.stdout
+    parsed = parse_json_object(text, "Codex CLI")
+    parsed["_provider"] = "codex_cli"
+    return parsed
+
+
+def codex_prompt_with_schema(prompt: str, schema: dict[str, Any]) -> str:
+    return (
+        "You are Codex acting as a maintainer triage agent. "
+        "Return only valid JSON matching this JSON Schema.\n\n"
+        f"JSON Schema:\n{json.dumps(schema['schema'], indent=2, sort_keys=True)}\n\n"
+        f"Input:\n{prompt}"
+    )
+
+
+def local_codex_home() -> Path:
+    path = CACHE_ROOT / "codex-home"
+    path.mkdir(parents=True, exist_ok=True)
+    return path.resolve()
+
+
+def extract_response_text(raw: dict[str, Any]) -> str:
+    if isinstance(raw.get("output_text"), str):
+        return raw["output_text"]
+    chunks: list[str] = []
+    for item in raw.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        for content in item.get("content") or []:
+            if isinstance(content, dict) and isinstance(content.get("text"), str):
+                chunks.append(content["text"])
+    if chunks:
+        return "\n".join(chunks)
+    raise TriageError("Responses API returned no text output")
+
+
+def parse_json_object(text: str, source: str) -> dict[str, Any]:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError as error:
+        raise TriageError(f"{source} returned invalid JSON: {error}") from error
+    if not isinstance(parsed, dict):
+        raise TriageError(f"{source} returned JSON that is not an object")
+    return parsed
+
+
+def cached_ai_result(
+    repo: str,
+    kind: str,
+    key: str,
+    *,
+    refresh: bool,
+    compute: Any,
+) -> dict[str, Any]:
+    path = ai_cache_path(repo, kind, key)
+    if path.exists() and not refresh:
+        return read_cache(path)
+    result = compute()
+    result.setdefault("_cachedAt", datetime.now(timezone.utc).isoformat())
+    write_cache(path, result)
+    return result
+
+
+def ai_cache_path(repo: str, kind: str, key: str) -> Path:
+    return cache_path_for_repo(repo).parent / "ai" / kind / f"{safe_segment(key)}.json"
+
+
+def alignment_cache_key(pr: dict[str, Any], model: str) -> str:
+    return f"{model}_pr_{pr.get('number')}_{sha256_text(pr_fingerprint_text(pr))[:12]}"
+
+
+def codex_cache_key(kind: str, prs: list[dict[str, Any]], model: str) -> str:
+    numbers = "_".join(str(pr.get("number")) for pr in prs)
+    text = "\n".join(pr_fingerprint_text(pr) for pr in prs)
+    return f"{model}_{kind}_{numbers}_{sha256_text(text)[:12]}"
+
+
+def load_dotenv(path: Path = Path(".env")) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            values[key] = value
+    return values
+
+
+def find_pr(data: dict[str, Any], number: int) -> dict[str, Any]:
+    for pr in data.get("prs") or []:
+        if isinstance(pr, dict) and int_or_zero(pr.get("number")) == number:
+            return pr
+    raise TriageError(f"PR #{number} was not found in cached scan for {data.get('repo', 'unknown')}")
+
+
+def select_recommendation_candidates(data: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
+    prs = [pr for pr in data.get("prs") or [] if isinstance(pr, dict)]
+    return sorted(prs, key=recommendation_priority, reverse=True)[:limit]
+
+
+def recommendation_priority(pr: dict[str, Any]) -> int:
+    signals = pr.get("signals") or {}
+    trust = pr.get("contributorTrust") or {}
+    flags = pr.get("flags") or []
+    score = len(flags) * 12
+    score += max(0, 70 - int_or_zero(trust.get("score")))
+    if signals.get("reviewState") == "none":
+        score += 8
+    if signals.get("coreFilesChanged"):
+        score += 12
+    if signals.get("largeDiff"):
+        score += 8
+    if signals.get("docsOnly"):
+        score += 5
+    return score
+
+
+def pr_context(pr: dict[str, Any]) -> dict[str, Any]:
+    signals = pr.get("signals") or {}
+    trust = pr.get("contributorTrust") or {}
+    contributor = pr.get("contributor") or {}
+    return {
+        "number": pr.get("number"),
+        "title": pr.get("title"),
+        "body": truncate_text(pr.get("body") or "", 1200),
+        "author": (pr.get("author") or {}).get("login"),
+        "url": pr.get("url"),
+        "createdAt": pr.get("createdAt"),
+        "additions": pr.get("additions"),
+        "deletions": pr.get("deletions"),
+        "changedFiles": pr.get("changedFiles"),
+        "files": [
+            {
+                "filename": file.get("filename"),
+                "status": file.get("status"),
+                "additions": file.get("additions"),
+                "deletions": file.get("deletions"),
+                "patch": truncate_text(file.get("patch") or "", 1800),
+            }
+            for file in (pr.get("files") or [])[:8]
+            if isinstance(file, dict)
+        ],
+        "changelets": pr.get("changelets") or [],
+        "flags": pr.get("flags") or [],
+        "signals": {
+            "fileNames": signals.get("fileNames") or [],
+            "fileBuckets": signals.get("fileBuckets") or {},
+            "docsOnly": signals.get("docsOnly"),
+            "hasTests": signals.get("hasTests"),
+            "ciState": signals.get("ciState"),
+            "reviewState": signals.get("reviewState"),
+            "genericDescription": signals.get("genericDescription"),
+            "coreFilesChanged": signals.get("coreFilesChanged") or [],
+            "dependencyFilesChanged": signals.get("dependencyFilesChanged") or [],
+            "totalChanges": signals.get("totalChanges"),
+        },
+        "contributorTrust": trust,
+        "contributor": {
+            "accountAssociation": contributor.get("accountAssociation"),
+            "priorMergedPrs": contributor.get("priorMergedPrs"),
+            "currentOpenPrsInScan": contributor.get("currentOpenPrsInScan"),
+            "repoCommitContributions": contributor.get("repoCommitContributions"),
+        },
+    }
+
+
+def pr_fingerprint_text(pr: dict[str, Any]) -> str:
+    context = pr_context(pr)
+    context["files"] = [
+        {key: value for key, value in file.items() if key != "patch"}
+        for file in context.get("files", [])
+    ]
+    return json.dumps(context, sort_keys=True)
+
+
+def print_json_result(title: str, result: dict[str, Any]) -> None:
+    print(title)
+    print("-" * len(title))
+    print(json.dumps(result, indent=2, sort_keys=True))
 
 
 def clamp_score(score: int) -> int:

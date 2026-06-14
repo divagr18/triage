@@ -1,4 +1,5 @@
 import json
+import argparse
 import tempfile
 import unittest
 from subprocess import CompletedProcess
@@ -646,6 +647,200 @@ class PhaseOneTests(unittest.TestCase):
             )
 
         self.assertEqual(waves, [])
+
+    def test_explain_command_uses_codex_and_caches_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(triage, "CACHE_ROOT", Path(directory)):
+                data = {
+                    "repo": "owner/repo",
+                    "prs": [
+                        {
+                            "number": 7,
+                            "title": "fix: parser null crash",
+                            "body": "Fixes null crash in parser.",
+                            "createdAt": "2026-06-01T00:00:00Z",
+                            "files": [{"filename": "src/parser.py", "patch": "@@\n+if value is None: return"}],
+                            "signals": {"fileNames": ["src/parser.py"], "hasTests": False, "reviewState": "none"},
+                            "flags": ["core_change_without_tests"],
+                            "changelets": ["add null guard"],
+                            "contributorTrust": {"score": 42},
+                            "contributor": {},
+                            "author": {"login": "alice"},
+                        }
+                    ],
+                }
+                triage.write_cache(triage.cache_path_for_repo("owner/repo"), data)
+                args = argparse.Namespace(repo="owner/repo", pr=7, model="gpt-5.4", refresh_ai=False)
+
+                with patch(
+                    "triage.run_codex_explain",
+                    return_value={
+                        "pr": 7,
+                        "summary": "Adds a parser null guard.",
+                        "actualChange": "Adds guard in parser.",
+                        "patchTextAlignment": "aligned",
+                        "riskLevel": "medium",
+                        "recommendedAction": "risky_but_maybe_valuable",
+                        "reasons": ["Fix matches title"],
+                        "risks": ["No tests"],
+                        "questionsForMaintainer": [],
+                        "confidence": 0.82,
+                    },
+                ) as codex:
+                    triage.explain_command(args)
+                    triage.explain_command(args)
+
+                self.assertEqual(codex.call_count, 1)
+                cached = list((Path(directory) / "owner_repo" / "ai" / "codex_explain").glob("*.json"))
+                self.assertEqual(len(cached), 1)
+
+    def test_align_command_uses_responses_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(triage, "CACHE_ROOT", Path(directory)):
+                data = {
+                    "repo": "owner/repo",
+                    "prs": [
+                        {
+                            "number": 8,
+                            "title": "Improve docs",
+                            "body": "Improves setup docs.",
+                            "createdAt": "2026-06-01T00:00:00Z",
+                            "files": [{"filename": "README.md", "patch": "@@\n+setup"}],
+                            "signals": {"fileNames": ["README.md"], "docsOnly": True},
+                            "flags": ["readme_only_noise"],
+                            "changelets": ["edit README only"],
+                            "contributorTrust": {"score": 35},
+                            "contributor": {},
+                            "author": {"login": "bob"},
+                        }
+                    ],
+                }
+                triage.write_cache(triage.cache_path_for_repo("owner/repo"), data)
+                args = argparse.Namespace(repo="owner/repo", pr=8, model="gpt-5.4", refresh_ai=False)
+
+                with patch(
+                    "triage.run_patch_text_alignment",
+                    return_value={
+                        "pr": 8,
+                        "alignmentScore": 0.9,
+                        "verdict": "aligned",
+                        "claimedIntent": "Improve setup docs.",
+                        "actualChange": "README setup text changed.",
+                        "mismatches": [],
+                        "evidence": ["README.md changed"],
+                        "confidence": 0.88,
+                    },
+                ) as responses:
+                    triage.align_command(args)
+                    triage.align_command(args)
+
+                self.assertEqual(responses.call_count, 1)
+
+    def test_recommend_command_sends_highest_priority_prs_to_codex(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(triage, "CACHE_ROOT", Path(directory)):
+                data = {
+                    "repo": "owner/repo",
+                    "prs": [
+                        {
+                            "number": 1,
+                            "title": "docs",
+                            "files": [],
+                            "signals": {"reviewState": "none", "docsOnly": True},
+                            "flags": ["readme_only_noise"],
+                            "contributorTrust": {"score": 25},
+                            "contributor": {},
+                            "author": {"login": "new"},
+                        },
+                        {
+                            "number": 2,
+                            "title": "trusted fix",
+                            "files": [],
+                            "signals": {"reviewState": "approved"},
+                            "flags": [],
+                            "contributorTrust": {"score": 92},
+                            "contributor": {},
+                            "author": {"login": "maintainer"},
+                        },
+                    ],
+                }
+                triage.write_cache(triage.cache_path_for_repo("owner/repo"), data)
+                args = argparse.Namespace(repo="owner/repo", limit=1, model="gpt-5.4", refresh_ai=True)
+
+                with patch(
+                    "triage.run_codex_recommend",
+                    return_value={
+                        "recommendations": [
+                            {
+                                "pr": 1,
+                                "action": "probably_junk",
+                                "priority": 1,
+                                "reason": "README-only low-trust PR.",
+                                "risks": [],
+                                "confidence": 0.8,
+                            }
+                        ],
+                        "summary": "One risky PR.",
+                    },
+                ) as codex:
+                    triage.recommend_command(args)
+
+                sent_prs = codex.call_args.args[1]
+                self.assertEqual([pr["number"] for pr in sent_prs], [1])
+
+    def test_compare_command_uses_codex_and_caches_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(triage, "CACHE_ROOT", Path(directory)):
+                data = {
+                    "repo": "owner/repo",
+                    "prs": [
+                        {
+                            "number": 3,
+                            "title": "fix: parser guard",
+                            "files": [],
+                            "signals": {"reviewState": "none"},
+                            "flags": [],
+                            "changelets": ["add null guard"],
+                            "contributorTrust": {"score": 70},
+                            "contributor": {},
+                            "author": {"login": "alice"},
+                        },
+                        {
+                            "number": 4,
+                            "title": "docs: mention parser guard",
+                            "files": [],
+                            "signals": {"reviewState": "none", "docsOnly": True},
+                            "flags": ["readme_only_noise"],
+                            "changelets": ["edit README only"],
+                            "contributorTrust": {"score": 35},
+                            "contributor": {},
+                            "author": {"login": "bob"},
+                        },
+                    ],
+                }
+                triage.write_cache(triage.cache_path_for_repo("owner/repo"), data)
+                args = argparse.Namespace(repo="owner/repo", left=3, right=4, model="gpt-5.4", refresh_ai=False)
+
+                with patch(
+                    "triage.run_codex_compare",
+                    return_value={
+                        "leftPr": 3,
+                        "rightPr": 4,
+                        "sameIntent": False,
+                        "betterReviewCandidate": 3,
+                        "canonicalRationale": "PR 3 changes code; PR 4 is docs only.",
+                        "leftStrengths": ["Behavior change"],
+                        "rightStrengths": ["Low risk"],
+                        "leftRisks": [],
+                        "rightRisks": ["No behavior delta"],
+                        "suggestedAction": "Review #3 first.",
+                        "confidence": 0.84,
+                    },
+                ) as codex:
+                    triage.compare_command(args)
+                    triage.compare_command(args)
+
+                self.assertEqual(codex.call_count, 1)
 
 
 if __name__ == "__main__":

@@ -127,6 +127,8 @@ export interface PullRequest {
   signals: Signals
   flags: string[]
   changelets?: string[]
+  llmChangelets?: LlmChangeletsSummary
+  ml?: PrMlSummary
   contributorTrust: ContributorTrust
   recommendation?: Recommendation
   alignment?: PrAlignmentSummary
@@ -197,6 +199,10 @@ export interface AiStatus {
   hasAlignment: boolean
   hasExplain: boolean
   hasCompare: boolean
+  hasLlmChangelets?: boolean
+  hasLowValueClassifier?: boolean
+  hasTestRealism?: boolean
+  hasVisionAlignment?: boolean
   alignment?: {
     verdict?: string
     score?: number
@@ -207,6 +213,10 @@ export interface AiStatus {
   } | null
   explain?: { cachedAt?: string; provider?: string } | null
   compare?: Array<{ cachedAt?: string; provider?: string }>
+  llmChangelets?: LlmChangeletsSummary | null
+  lowValue?: LowValueSummary | null
+  testRealism?: TestRealismSummary | null
+  vision?: VisionSummary | null
 }
 
 export interface AiCache {
@@ -214,6 +224,52 @@ export interface AiCache {
   explain: Record<string, CodexPrExplain>
   recommendations: CodexRecommendationBatch[]
   compare: CodexCompare[]
+  changelets: Record<string, LlmChangeletsResult>
+  lowValue: Record<string, LowValueResult>
+  testRealism: Record<string, TestRealismResult>
+  vision: Record<string, VisionAlignmentResult>
+}
+
+export interface LlmChangeletsSummary {
+  changelets: string[]
+  behaviorSummary?: string
+  riskChangelets?: string[]
+  confidence?: number
+}
+
+export interface LowValueSummary {
+  isLowValue?: boolean
+  category?: string
+  score?: number
+  reasons?: string[]
+  confidence?: number
+}
+
+export interface TestRealismSummary {
+  score?: number
+  verdict?: string
+  realAssertions?: boolean
+  mockHeavy?: boolean
+  coversChangedBehavior?: boolean
+  reasons?: string[]
+  confidence?: number
+}
+
+export interface VisionSummary {
+  verdict?: string
+  score?: number
+  matchedGoals?: string[]
+  matchedNonGoals?: string[]
+  protectedPathIssues?: string[]
+  requiresMaintainerReview?: boolean
+  reasons?: string[]
+  confidence?: number
+}
+
+export interface PrMlSummary {
+  lowValue?: LowValueSummary | null
+  testRealism?: TestRealismSummary | null
+  vision?: VisionSummary | null
 }
 
 export interface PatchTextAlignment {
@@ -226,6 +282,50 @@ export interface PatchTextAlignment {
   actualChange: string
   mismatches: string[]
   evidence: string[]
+  confidence: number
+}
+
+export interface LlmChangeletsResult extends LlmChangeletsSummary {
+  _cachedAt?: string
+  _provider?: string
+  pr: number
+}
+
+export interface LowValueResult extends LowValueSummary {
+  _cachedAt?: string
+  _provider?: string
+  pr: number
+  isLowValue: boolean
+  category: string
+  score: number
+  reasons: string[]
+  confidence: number
+}
+
+export interface TestRealismResult extends TestRealismSummary {
+  _cachedAt?: string
+  _provider?: string
+  pr: number
+  score: number
+  verdict: string
+  realAssertions: boolean
+  mockHeavy: boolean
+  coversChangedBehavior: boolean
+  reasons: string[]
+  confidence: number
+}
+
+export interface VisionAlignmentResult extends VisionSummary {
+  _cachedAt?: string
+  _provider?: string
+  pr: number
+  verdict: string
+  score: number
+  matchedGoals: string[]
+  matchedNonGoals: string[]
+  protectedPathIssues: string[]
+  requiresMaintainerReview: boolean
+  reasons: string[]
   confidence: number
 }
 

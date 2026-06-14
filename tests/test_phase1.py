@@ -983,6 +983,107 @@ class PhaseOneTests(unittest.TestCase):
 
         self.assertGreater(mismatched["score"], plain["score"])
 
+    def test_ai_status_applies_llm_changelets_and_ml_flags(self):
+        data = {
+            "repo": "owner/repo",
+            "prs": [
+                {
+                    "number": 10,
+                    "title": "fix: auth timeout",
+                    "body": "Fixes auth timeout with tests.",
+                    "createdAt": "2026-06-01T00:00:00Z",
+                    "additions": 10,
+                    "deletions": 1,
+                    "changedFiles": 1,
+                    "files": [{"filename": "src/auth.py", "patch": "@@\n+return timeout"}],
+                    "contributor": {},
+                    "author": {"login": "alice"},
+                }
+            ],
+        }
+        triage.attach_deterministic_signals(data)
+        status = {
+            "10": {
+                "alignment": None,
+                "llmChangelets": {
+                    "changelets": ["fix auth timeout"],
+                    "behaviorSummary": "Changes auth timeout handling.",
+                    "riskChangelets": ["touch auth without tests"],
+                    "confidence": 0.8,
+                },
+                "lowValue": {
+                    "isLowValue": True,
+                    "category": "unclear_patch",
+                    "score": 0.8,
+                    "reasons": ["thin context"],
+                    "confidence": 0.76,
+                },
+                "testRealism": {
+                    "score": 0.2,
+                    "verdict": "weak",
+                    "reasons": ["no behavior assertion"],
+                    "confidence": 0.7,
+                },
+                "vision": {
+                    "verdict": "drift",
+                    "score": 0.3,
+                    "reasons": ["outside goals"],
+                    "requiresMaintainerReview": True,
+                },
+            }
+        }
+
+        triage.apply_alignment_annotations(data, status)
+        pr = data["prs"][0]
+
+        self.assertIn("fix auth timeout", pr["changelets"])
+        self.assertIn("ml_low_value", pr["flags"])
+        self.assertIn("low_test_realism", pr["flags"])
+        self.assertIn("vision_drift", pr["flags"])
+        self.assertIn("requires_maintainer_review", pr["flags"])
+
+    def test_static_html_report_writes_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "report.html"
+            data = {
+                "repo": "owner/repo",
+                "schemaVersion": 5,
+                "state": "open",
+                "source": "test",
+                "scannedAt": "2026-06-01T00:00:00Z",
+                "prs": [
+                    {
+                        "number": 1,
+                        "title": "Update README",
+                        "flags": ["readme_only_noise"],
+                        "changelets": ["edit README only"],
+                        "contributorTrust": {"score": 40},
+                        "signals": {"fileBuckets": {"docs": 1}},
+                    }
+                ],
+                "signalSummary": {
+                    "flagCounts": {"readme_only_noise": 1},
+                    "fileBucketCounts": {"docs": 1},
+                    "changeletCounts": {"edit README only": 1},
+                    "lowValuePrs": 1,
+                    "riskyNewContributorPrs": 0,
+                    "lowTrustPrs": 0,
+                    "averageContributorTrust": 40,
+                },
+                "analysis": {
+                    "clusters": [],
+                    "floodWaves": [],
+                    "reviewQueue": [{"pr": 1, "title": "Update README", "bucket": "probably_junk", "score": 20}],
+                },
+            }
+
+            triage.render_static_html_report(data, output)
+
+            html = output.read_text(encoding="utf-8")
+            self.assertIn("Pull Guard static report", html)
+            self.assertIn("owner/repo", html)
+            self.assertIn("Update README", html)
+
 
 if __name__ == "__main__":
     unittest.main()

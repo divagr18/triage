@@ -42,7 +42,7 @@ function ScoreBar({ value }: { value: number }) {
 
 export function PrDetail({ pr, prs = [], clusters = [], ai, onRunAi, onClose }: Props) {
   const [tab, setTab] = useState<'overview' | 'ai' | 'diff'>('overview')
-  const [running, setRunning] = useState<'align' | 'explain' | 'compare' | null>(null)
+  const [running, setRunning] = useState<'align' | 'explain' | 'compare' | 'changelets' | 'classify' | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -66,6 +66,10 @@ export function PrDetail({ pr, prs = [], clusters = [], ai, onRunAi, onClose }: 
   const signals = pr.signals
   const alignment = ai?.alignment[String(prNumber)]
   const explain = ai?.explain[String(prNumber)]
+  const llmChangelets = ai?.changelets[String(prNumber)] ?? pr.llmChangelets
+  const lowValue = ai?.lowValue[String(prNumber)] ?? pr.ml?.lowValue
+  const testRealism = ai?.testRealism[String(prNumber)] ?? pr.ml?.testRealism
+  const vision = ai?.vision[String(prNumber)] ?? pr.ml?.vision
   const compareTarget = findCompareTarget(pr, prs, clusters)
   const compare = ai?.compare.find(
     (item) =>
@@ -74,7 +78,7 @@ export function PrDetail({ pr, prs = [], clusters = [], ai, onRunAi, onClose }: 
         (item.rightPr === pr.number && item.leftPr === compareTarget.number)),
   )
 
-  async function runAi(action: 'align' | 'explain') {
+  async function runAi(action: 'align' | 'explain' | 'changelets' | 'classify') {
     if (!onRunAi) return
     setRunning(action)
     setError(null)
@@ -285,7 +289,7 @@ export function PrDetail({ pr, prs = [], clusters = [], ai, onRunAi, onClose }: 
             <div className="grid gap-5 lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
               <div className="space-y-5">
                 <Section title="Run analysis">
-                  <div className="grid gap-2 sm:grid-cols-3">
+                  <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
                     <button
                       onClick={() => void runAi('align')}
                       disabled={!onRunAi || running !== null}
@@ -303,6 +307,22 @@ export function PrDetail({ pr, prs = [], clusters = [], ai, onRunAi, onClose }: 
                       Explain with Codex
                     </button>
                     <button
+                      onClick={() => void runAi('changelets')}
+                      disabled={!onRunAi || running !== null}
+                      className="flex items-center justify-center gap-2 rounded-md border border-cyan-500/25 bg-cyan-500/10 px-3 py-2 text-xs font-medium text-cyan-200 transition hover:border-cyan-400/45 disabled:opacity-60"
+                    >
+                      {running === 'changelets' ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                      Changelets
+                    </button>
+                    <button
+                      onClick={() => void runAi('classify')}
+                      disabled={!onRunAi || running !== null}
+                      className="flex items-center justify-center gap-2 rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs font-medium text-amber-200 transition hover:border-amber-400/45 disabled:opacity-60"
+                    >
+                      {running === 'classify' ? <Loader2 size={14} className="animate-spin" /> : <Brain size={14} />}
+                      Classify
+                    </button>
+                    <button
                       onClick={() => void runCompare()}
                       disabled={!onRunAi || running !== null || !compareTarget}
                       className="flex items-center justify-center gap-2 rounded-md border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-200 transition hover:border-emerald-400/45 disabled:opacity-60"
@@ -316,7 +336,7 @@ export function PrDetail({ pr, prs = [], clusters = [], ai, onRunAi, onClose }: 
                       {error}
                     </div>
                   )}
-                  {!alignment && !explain && !compare && (
+                  {!alignment && !explain && !compare && !llmChangelets && !lowValue && !testRealism && !vision && (
                     <p className="mt-3 text-xs leading-5 text-zinc-500">
                       No cached AI analysis for this PR yet.
                     </p>
@@ -343,6 +363,87 @@ export function PrDetail({ pr, prs = [], clusters = [], ai, onRunAi, onClose }: 
                         <div className="mb-1 text-xs font-medium text-zinc-300">Actual change</div>
                         <p className="text-sm leading-6 text-zinc-400">{alignment.actualChange}</p>
                       </div>
+                    </div>
+                  </Section>
+                )}
+
+                {llmChangelets && (
+                  <Section title="LLM semantic changelets">
+                    {llmChangelets.behaviorSummary && (
+                      <p className="mb-3 text-sm leading-6 text-zinc-300">{llmChangelets.behaviorSummary}</p>
+                    )}
+                    <div className="flex flex-wrap gap-2">
+                      {llmChangelets.changelets.map((changelet) => (
+                        <span
+                          key={changelet}
+                          className="rounded-md border border-cyan-400/15 bg-cyan-400/10 px-2 py-1 text-[11px] text-cyan-200"
+                        >
+                          {changelet}
+                        </span>
+                      ))}
+                    </div>
+                    {llmChangelets.riskChangelets && llmChangelets.riskChangelets.length > 0 && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {llmChangelets.riskChangelets.map((risk) => (
+                          <span
+                            key={risk}
+                            className="rounded-md border border-amber-400/20 bg-amber-400/[0.08] px-2 py-1 text-[11px] text-amber-200"
+                          >
+                            {risk}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </Section>
+                )}
+
+                {(lowValue || testRealism || vision) && (
+                  <Section title="ML classifiers">
+                    <div className="grid gap-3">
+                      {lowValue && (
+                        <div className="rounded-md border border-zinc-800 bg-black/25 p-3">
+                          <div className="mb-1 flex items-center justify-between gap-3 text-xs">
+                            <span className="font-medium text-zinc-300">Low-value classifier</span>
+                            <span className="font-mono text-amber-200">
+                              {Math.round((lowValue.score ?? 0) * 100)}
+                            </span>
+                          </div>
+                          <p className="text-xs leading-5 text-zinc-500">
+                            {lowValue.isLowValue ? lowValue.category?.replace(/_/g, ' ') : 'not low value'}
+                          </p>
+                          {lowValue.reasons && lowValue.reasons.length > 0 && (
+                            <p className="mt-2 text-xs leading-5 text-zinc-400">{lowValue.reasons.join('; ')}</p>
+                          )}
+                        </div>
+                      )}
+                      {testRealism && (
+                        <div className="rounded-md border border-zinc-800 bg-black/25 p-3">
+                          <div className="mb-1 flex items-center justify-between gap-3 text-xs">
+                            <span className="font-medium text-zinc-300">Test realism</span>
+                            <span className="font-mono text-emerald-200">
+                              {Math.round((testRealism.score ?? 0) * 100)}
+                            </span>
+                          </div>
+                          <p className="text-xs leading-5 text-zinc-500">{testRealism.verdict}</p>
+                          {testRealism.reasons && testRealism.reasons.length > 0 && (
+                            <p className="mt-2 text-xs leading-5 text-zinc-400">{testRealism.reasons.join('; ')}</p>
+                          )}
+                        </div>
+                      )}
+                      {vision && (
+                        <div className="rounded-md border border-zinc-800 bg-black/25 p-3">
+                          <div className="mb-1 flex items-center justify-between gap-3 text-xs">
+                            <span className="font-medium text-zinc-300">Vision alignment</span>
+                            <span className="font-mono text-fuchsia-200">
+                              {Math.round((vision.score ?? 0) * 100)}
+                            </span>
+                          </div>
+                          <p className="text-xs leading-5 text-zinc-500">{vision.verdict}</p>
+                          {vision.reasons && vision.reasons.length > 0 && (
+                            <p className="mt-2 text-xs leading-5 text-zinc-400">{vision.reasons.join('; ')}</p>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </Section>
                 )}

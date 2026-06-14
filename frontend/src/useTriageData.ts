@@ -83,5 +83,7 @@ export function useRepoData(slug: string | null) {
 export type AiActionRequest =
   | { action: 'align'; pr: number }
   | { action: 'explain'; pr: number }
+  | { action: 'changelets'; pr: number }
+  | { action: 'classify'; pr: number }
   | { action: 'compare'; left: number; right: number }
   | { action: 'recommend'; limit?: number }

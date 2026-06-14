@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 import json
 import os
 import re
@@ -260,6 +261,129 @@ CODEX_RECOMMEND_SCHEMA = {
     },
 }
 
+LLM_CHANGELETS_SCHEMA = {
+    "name": "llm_semantic_changelets",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "pr": {"type": "integer"},
+            "changelets": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 3,
+                "maxItems": 8,
+            },
+            "behaviorSummary": {"type": "string"},
+            "riskChangelets": {"type": "array", "items": {"type": "string"}},
+            "confidence": {"type": "number"},
+        },
+        "required": ["pr", "changelets", "behaviorSummary", "riskChangelets", "confidence"],
+        "additionalProperties": False,
+    },
+}
+
+CLUSTER_LABEL_SCHEMA = {
+    "name": "codex_cluster_label",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "clusterId": {"type": "string"},
+            "label": {"type": "string"},
+            "summary": {"type": "string"},
+            "canonicalReason": {"type": "string"},
+            "confidence": {"type": "number"},
+        },
+        "required": ["clusterId", "label", "summary", "canonicalReason", "confidence"],
+        "additionalProperties": False,
+    },
+}
+
+LOW_VALUE_CLASSIFIER_SCHEMA = {
+    "name": "low_value_pr_classifier",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "pr": {"type": "integer"},
+            "isLowValue": {"type": "boolean"},
+            "category": {
+                "type": "string",
+                "enum": [
+                    "not_low_value",
+                    "docs_noise",
+                    "duplicate_attempt",
+                    "generic_agent_output",
+                    "untested_core_change",
+                    "dependency_or_config_churn",
+                    "unclear_patch",
+                ],
+            },
+            "score": {"type": "number"},
+            "reasons": {"type": "array", "items": {"type": "string"}},
+            "confidence": {"type": "number"},
+        },
+        "required": ["pr", "isLowValue", "category", "score", "reasons", "confidence"],
+        "additionalProperties": False,
+    },
+}
+
+TEST_REALISM_SCHEMA = {
+    "name": "test_realism_score",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "pr": {"type": "integer"},
+            "score": {"type": "number"},
+            "verdict": {"type": "string", "enum": ["strong", "adequate", "weak", "none", "unclear"]},
+            "realAssertions": {"type": "boolean"},
+            "mockHeavy": {"type": "boolean"},
+            "coversChangedBehavior": {"type": "boolean"},
+            "reasons": {"type": "array", "items": {"type": "string"}},
+            "confidence": {"type": "number"},
+        },
+        "required": [
+            "pr",
+            "score",
+            "verdict",
+            "realAssertions",
+            "mockHeavy",
+            "coversChangedBehavior",
+            "reasons",
+            "confidence",
+        ],
+        "additionalProperties": False,
+    },
+}
+
+VISION_ALIGNMENT_SCHEMA = {
+    "name": "repo_vision_alignment",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "pr": {"type": "integer"},
+            "verdict": {"type": "string", "enum": ["aligned", "neutral", "drift", "violation", "unclear"]},
+            "score": {"type": "number"},
+            "matchedGoals": {"type": "array", "items": {"type": "string"}},
+            "matchedNonGoals": {"type": "array", "items": {"type": "string"}},
+            "protectedPathIssues": {"type": "array", "items": {"type": "string"}},
+            "requiresMaintainerReview": {"type": "boolean"},
+            "reasons": {"type": "array", "items": {"type": "string"}},
+            "confidence": {"type": "number"},
+        },
+        "required": [
+            "pr",
+            "verdict",
+            "score",
+            "matchedGoals",
+            "matchedNonGoals",
+            "protectedPathIssues",
+            "requiresMaintainerReview",
+            "reasons",
+            "confidence",
+        ],
+        "additionalProperties": False,
+    },
+}
+
 
 class TriageError(RuntimeError):
     pass
@@ -354,6 +478,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     report = subcommands.add_parser("report", help="show deterministic signal summary from cache")
     report.add_argument("repo", help="repository in owner/repo form")
+    report.add_argument("--html", action="store_true", help="write a static HTML report from cache")
+    report.add_argument("--output", help="HTML report path; defaults to cache report.html")
 
     changelets = subcommands.add_parser("changelets", help="show semantic changelets from cache")
     changelets.add_argument("repo", help="repository in owner/repo form")
@@ -409,6 +535,11 @@ def build_parser() -> argparse.ArgumentParser:
     enrich.add_argument("--align", action="store_true", help="run patch-text alignment")
     enrich.add_argument("--explain", action="store_true", help="run Codex explain")
     enrich.add_argument("--recommend", action="store_true", help="run Codex recommendations")
+    enrich.add_argument("--changelets", action="store_true", help="run LLM semantic changelet extraction")
+    enrich.add_argument("--cluster-labels", action="store_true", help="run Codex cluster label generation")
+    enrich.add_argument("--classify", action="store_true", help="run low-value and test-realism classifiers")
+    enrich.add_argument("--vision", action="store_true", help="run repo vision alignment classifier")
+    enrich.add_argument("--vision-config", help="path to repo vision YAML/JSON/text config")
     enrich.add_argument("--prs", help="comma-separated PR numbers for alignment/explain")
     enrich.add_argument("--limit", type=positive_int, default=10)
     enrich.add_argument("--model", default=DEFAULT_CODEX_MODEL)
@@ -523,10 +654,16 @@ def derive_command(args: argparse.Namespace) -> None:
 
 def report_command(args: argparse.Namespace) -> None:
     validate_repo(args.repo)
-    data = read_cache(cache_path_for_repo(args.repo))
+    path = cache_path_for_repo(args.repo)
+    data = read_cache(path)
     attach_deterministic_signals(data)
     apply_alignment_annotations(data, build_ai_status(args.repo, data.get("prs") or []))
     data["signalSummary"] = compute_signal_summary(data.get("prs") or [])
+    if args.html:
+        output = Path(args.output) if args.output else path.parent / "report.html"
+        render_static_html_report(data, output)
+        print(f"HTML report: {output}")
+        return
     print_signal_report(data)
 
 
@@ -670,11 +807,23 @@ def enrich_command(args: argparse.Namespace) -> None:
     path = cache_path_for_repo(args.repo)
     data = read_cache(path)
     attach_deterministic_signals(data)
-    requested = args.align or args.explain or args.recommend
+    requested = (
+        args.align
+        or args.explain
+        or args.recommend
+        or args.changelets
+        or args.cluster_labels
+        or args.classify
+        or args.vision
+    )
     if not requested:
-        raise TriageError("choose at least one enrichment: --align, --explain, or --recommend")
+        raise TriageError(
+            "choose at least one enrichment: --align, --explain, --recommend, "
+            "--changelets, --cluster-labels, --classify, or --vision"
+        )
 
     selected_prs = select_prs_for_enrichment(data, prs_text=args.prs, limit=args.limit)
+    vision_config_text = read_vision_config(args.vision_config) if args.vision else ""
     if args.align:
         for pr in selected_prs:
             cached_ai_result(
@@ -695,6 +844,45 @@ def enrich_command(args: argparse.Namespace) -> None:
                 compute=lambda pr=pr: run_codex_explain(args.repo, pr, model=args.model),
             )
             print(f"explained #{pr.get('number')}")
+    if args.changelets:
+        for pr in selected_prs:
+            cached_ai_result(
+                args.repo,
+                "llm_changelets",
+                llm_changelets_cache_key(pr, args.alignment_model),
+                refresh=args.refresh_ai,
+                compute=lambda pr=pr: run_llm_changelets(pr, model=args.alignment_model),
+            )
+            print(f"llm changelets #{pr.get('number')}")
+    if args.classify:
+        for pr in selected_prs:
+            cached_ai_result(
+                args.repo,
+                "low_value",
+                low_value_cache_key(pr, args.alignment_model),
+                refresh=args.refresh_ai,
+                compute=lambda pr=pr: run_low_value_classifier(pr, model=args.alignment_model),
+            )
+            cached_ai_result(
+                args.repo,
+                "test_realism",
+                test_realism_cache_key(pr, args.alignment_model),
+                refresh=args.refresh_ai,
+                compute=lambda pr=pr: run_test_realism_classifier(pr, model=args.alignment_model),
+            )
+            print(f"classified #{pr.get('number')}")
+    if args.vision:
+        if not vision_config_text:
+            raise TriageError("--vision requires --vision-config or a local pullguard.yml/.triage/vision.yml")
+        for pr in selected_prs:
+            cached_ai_result(
+                args.repo,
+                "vision_alignment",
+                vision_cache_key(pr, vision_config_text, args.alignment_model),
+                refresh=args.refresh_ai,
+                compute=lambda pr=pr: run_vision_alignment(pr, vision_config=vision_config_text, model=args.alignment_model),
+            )
+            print(f"vision #{pr.get('number')}")
     if args.recommend:
         candidates = select_recommendation_candidates(data, limit=args.limit)
         if candidates:
@@ -706,6 +894,28 @@ def enrich_command(args: argparse.Namespace) -> None:
                 compute=lambda: run_codex_recommend(args.repo, candidates, model=args.model),
             )
             print(f"recommended {len(candidates)} PRs")
+    if args.cluster_labels:
+        derive_analysis(
+            args.repo,
+            data,
+            threshold=0.62,
+            flood_threshold=0.72,
+            flood_window_hours=48,
+            flood_min_size=3,
+            model_name=DEFAULT_EMBEDDING_MODEL,
+            refresh_embeddings=False,
+        )
+        for cluster in (data.get("analysis") or {}).get("clusters") or []:
+            if not isinstance(cluster, dict):
+                continue
+            cached_ai_result(
+                args.repo,
+                "cluster_label",
+                cluster_label_cache_key(cluster, args.model),
+                refresh=args.refresh_ai,
+                compute=lambda cluster=cluster: run_codex_cluster_label(args.repo, cluster, data, model=args.model),
+            )
+            print(f"cluster label {cluster.get('id')}")
 
     attach_deterministic_signals(data)
     derive_analysis(
@@ -745,6 +955,7 @@ def derive_analysis(
         refresh_embeddings=refresh_embeddings,
         ai_status=ai_status,
     )
+    apply_cluster_label_annotations(repo, clusters)
     cluster_by_pr = build_cluster_index(clusters)
     waves = build_ai_flood_waves(
         repo,
@@ -1238,9 +1449,17 @@ def build_ai_status(repo: str, prs: list[Any]) -> dict[str, Any]:
             "hasAlignment": False,
             "hasExplain": False,
             "hasCompare": False,
+            "hasLlmChangelets": False,
+            "hasLowValueClassifier": False,
+            "hasTestRealism": False,
+            "hasVisionAlignment": False,
             "alignment": None,
             "explain": None,
             "compare": [],
+            "llmChangelets": None,
+            "lowValue": None,
+            "testRealism": None,
+            "vision": None,
         }
         for pr in prs
         if isinstance(pr, dict) and pr.get("number") is not None
@@ -1263,6 +1482,30 @@ def build_ai_status(repo: str, prs: list[Any]) -> dict[str, Any]:
             if slot is not None:
                 slot["hasCompare"] = True
                 slot["compare"].append(compact_ai_result_status(result))
+    for result in read_ai_cache_files(repo, "llm_changelets"):
+        number = result.get("pr")
+        slot = status.get(str(number))
+        if slot is not None:
+            slot["hasLlmChangelets"] = True
+            slot["llmChangelets"] = compact_llm_changelets_status(result)
+    for result in read_ai_cache_files(repo, "low_value"):
+        number = result.get("pr")
+        slot = status.get(str(number))
+        if slot is not None:
+            slot["hasLowValueClassifier"] = True
+            slot["lowValue"] = compact_low_value_status(result)
+    for result in read_ai_cache_files(repo, "test_realism"):
+        number = result.get("pr")
+        slot = status.get(str(number))
+        if slot is not None:
+            slot["hasTestRealism"] = True
+            slot["testRealism"] = compact_test_realism_status(result)
+    for result in read_ai_cache_files(repo, "vision_alignment"):
+        number = result.get("pr")
+        slot = status.get(str(number))
+        if slot is not None:
+            slot["hasVisionAlignment"] = True
+            slot["vision"] = compact_vision_status(result)
     return status
 
 
@@ -1303,6 +1546,66 @@ def compact_alignment_status(result: dict[str, Any]) -> dict[str, Any]:
     return status
 
 
+def compact_llm_changelets_status(result: dict[str, Any]) -> dict[str, Any]:
+    status = compact_ai_result_status(result)
+    status.update(
+        {
+            "changelets": result.get("changelets") or [],
+            "behaviorSummary": result.get("behaviorSummary"),
+            "riskChangelets": result.get("riskChangelets") or [],
+            "confidence": result.get("confidence"),
+        }
+    )
+    return status
+
+
+def compact_low_value_status(result: dict[str, Any]) -> dict[str, Any]:
+    status = compact_ai_result_status(result)
+    status.update(
+        {
+            "isLowValue": result.get("isLowValue"),
+            "category": result.get("category"),
+            "score": result.get("score"),
+            "reasons": result.get("reasons") or [],
+            "confidence": result.get("confidence"),
+        }
+    )
+    return status
+
+
+def compact_test_realism_status(result: dict[str, Any]) -> dict[str, Any]:
+    status = compact_ai_result_status(result)
+    status.update(
+        {
+            "score": result.get("score"),
+            "verdict": result.get("verdict"),
+            "realAssertions": result.get("realAssertions"),
+            "mockHeavy": result.get("mockHeavy"),
+            "coversChangedBehavior": result.get("coversChangedBehavior"),
+            "reasons": result.get("reasons") or [],
+            "confidence": result.get("confidence"),
+        }
+    )
+    return status
+
+
+def compact_vision_status(result: dict[str, Any]) -> dict[str, Any]:
+    status = compact_ai_result_status(result)
+    status.update(
+        {
+            "verdict": result.get("verdict"),
+            "score": result.get("score"),
+            "matchedGoals": result.get("matchedGoals") or [],
+            "matchedNonGoals": result.get("matchedNonGoals") or [],
+            "protectedPathIssues": result.get("protectedPathIssues") or [],
+            "requiresMaintainerReview": result.get("requiresMaintainerReview"),
+            "reasons": result.get("reasons") or [],
+            "confidence": result.get("confidence"),
+        }
+    )
+    return status
+
+
 def apply_alignment_annotations(data: dict[str, Any], ai_status: dict[str, Any]) -> None:
     for pr in [pr for pr in data.get("prs") or [] if isinstance(pr, dict)]:
         status = ai_status.get(str(pr.get("number"))) or {}
@@ -1318,7 +1621,45 @@ def apply_alignment_annotations(data: dict[str, Any], ai_status: dict[str, Any])
         }
         flags = list(pr.get("flags") or [])
         flags.extend(alignment_flags(pr, pr["alignment"]))
+        llm_changelets = status.get("llmChangelets") or {}
+        if llm_changelets:
+            pr["llmChangelets"] = llm_changelets
+            pr["changelets"] = merge_changelets(pr.get("changelets") or [], llm_changelets.get("changelets") or [])
+        low_value = status.get("lowValue") or {}
+        test_realism = status.get("testRealism") or {}
+        vision = status.get("vision") or {}
+        if low_value or test_realism or vision:
+            pr["ml"] = {
+                "lowValue": low_value or None,
+                "testRealism": test_realism or None,
+                "vision": vision or None,
+            }
+        flags.extend(ml_flags(low_value=low_value, test_realism=test_realism, vision=vision))
         pr["flags"] = unique_strings(flags)
+
+
+def merge_changelets(deterministic: list[str], llm_changelets: list[str]) -> list[str]:
+    return unique_strings([str(value).strip().lower() for value in deterministic + llm_changelets if value])[:10]
+
+
+def ml_flags(
+    *,
+    low_value: dict[str, Any],
+    test_realism: dict[str, Any],
+    vision: dict[str, Any],
+) -> list[str]:
+    flags: list[str] = []
+    if low_value.get("isLowValue") and float_or_zero(low_value.get("score")) >= 0.65:
+        flags.append("ml_low_value")
+    if test_realism.get("verdict") in {"weak", "none"} and float_or_zero(test_realism.get("score")) < 0.45:
+        flags.append("low_test_realism")
+    if vision.get("verdict") == "drift":
+        flags.append("vision_drift")
+    if vision.get("verdict") == "violation" or vision.get("protectedPathIssues"):
+        flags.append("protected_path_violation")
+    if vision.get("requiresMaintainerReview"):
+        flags.append("requires_maintainer_review")
+    return flags
 
 
 def estimate_patch_text_alignment(pr: dict[str, Any]) -> dict[str, Any]:
@@ -1783,6 +2124,29 @@ def annotate_cluster_recommendations(
             cluster["bestTitle"] = best_member.get("title")
             cluster["bestScore"] = best_member.get("canonicalScore")
             cluster["recommendation"] = best_member.get("recommendation")
+
+
+def apply_cluster_label_annotations(repo: str, clusters: list[dict[str, Any]]) -> None:
+    cached = read_ai_cache_files(repo, "cluster_label")
+    by_fingerprint = {
+        result.get("clusterFingerprint"): result
+        for result in cached
+        if result.get("clusterFingerprint")
+    }
+    by_id = {result.get("clusterId"): result for result in cached if result.get("clusterId")}
+    for cluster in clusters:
+        result = by_fingerprint.get(cluster_fingerprint(cluster)) or by_id.get(cluster.get("id"))
+        if not result:
+            continue
+        cluster["deterministicLabel"] = cluster.get("label")
+        cluster["label"] = result.get("label") or cluster.get("label")
+        cluster["aiLabel"] = {
+            "summary": result.get("summary"),
+            "canonicalReason": result.get("canonicalReason"),
+            "confidence": result.get("confidence"),
+            "cachedAt": result.get("_cachedAt"),
+            "provider": result.get("_provider"),
+        }
 
 
 def time_window_groups(
@@ -2619,6 +2983,40 @@ def canonical_recommendation(
     score_breakdown["patch_text_alignment"] = -alignment_penalty
     if alignment_penalty >= 12:
         risks.append("patch-text mismatch")
+    ml = pr.get("ml") or {}
+    low_value_ml = ml.get("lowValue") or {}
+    if low_value_ml.get("isLowValue"):
+        penalty = min(18, int(round(float_or_zero(low_value_ml.get("score")) * 18)))
+        score_breakdown["ml_low_value_classifier"] = -penalty
+        risks.append(f"ML low-value classifier: {low_value_ml.get('category', 'low value')}")
+    else:
+        score_breakdown["ml_low_value_classifier"] = 0
+    test_realism = ml.get("testRealism") or {}
+    if test_realism:
+        realism_score = float_or_zero(test_realism.get("score"))
+        score_breakdown["test_realism"] = int(round((realism_score - 0.5) * 18))
+        if test_realism.get("verdict") in {"strong", "adequate"}:
+            reasons.append("tests look behavior-relevant")
+        elif test_realism.get("verdict") in {"weak", "none"}:
+            risks.append("weak or missing realistic tests")
+    else:
+        score_breakdown["test_realism"] = 0
+    vision = ml.get("vision") or {}
+    if vision:
+        verdict = vision.get("verdict")
+        if verdict == "aligned":
+            score_breakdown["vision_alignment"] = 8
+            reasons.append("aligns with repo vision")
+        elif verdict == "drift":
+            score_breakdown["vision_alignment"] = -10
+            risks.append("vision drift")
+        elif verdict == "violation":
+            score_breakdown["vision_alignment"] = -18
+            risks.append("protected path or repo vision violation")
+        else:
+            score_breakdown["vision_alignment"] = 0
+    else:
+        score_breakdown["vision_alignment"] = 0
     flood_penalty = 10 if flood else 0
     score_breakdown["ai_flood_penalty"] = -flood_penalty
     if flood_penalty:
@@ -2811,6 +3209,8 @@ LOW_VALUE_FLAGS = {
     "lockfile_only",
     "formatting_churn",
     "description_too_generic",
+    "ml_low_value",
+    "low_test_realism",
 }
 
 
@@ -3209,6 +3609,114 @@ def run_codex_recommend(repo: str, prs: list[dict[str, Any]], *, model: str) -> 
     )
 
 
+def run_llm_changelets(pr: dict[str, Any], *, model: str) -> dict[str, Any]:
+    prompt = {
+        "task": "Extract normalized semantic changelets from this pull request patch.",
+        "pull_request": pr_context(pr),
+        "fingerprinting_guidance": FINGERPRINTING_GUIDANCE,
+        "output_rules": [
+            "Use short verb-led changelets, 2 to 6 words when possible.",
+            "Describe program transformations, not vague file edits.",
+            "Include riskChangelets for untested core changes, dependency churn, config mutation, or generated churn.",
+            "Return JSON only matching the schema.",
+        ],
+    }
+    return run_responses_json(
+        model=model,
+        schema=LLM_CHANGELETS_SCHEMA,
+        input_text=json.dumps(prompt, indent=2, sort_keys=True),
+    )
+
+
+def run_low_value_classifier(pr: dict[str, Any], *, model: str) -> dict[str, Any]:
+    prompt = {
+        "task": "Classify whether this PR is low-value for a maintainer triage queue.",
+        "pull_request": pr_context(pr),
+        "output_rules": [
+            "Low-value means shallow, duplicated, generic, unsupported by tests, or mostly noise.",
+            "Do not penalize a PR solely because the author is new.",
+            "Do not label a risky but meaningful code change as low-value just because it needs review.",
+            "Return JSON only matching the schema.",
+        ],
+    }
+    return run_responses_json(
+        model=model,
+        schema=LOW_VALUE_CLASSIFIER_SCHEMA,
+        input_text=json.dumps(prompt, indent=2, sort_keys=True),
+    )
+
+
+def run_test_realism_classifier(pr: dict[str, Any], *, model: str) -> dict[str, Any]:
+    prompt = {
+        "task": "Score whether this PR's tests realistically cover the changed behavior.",
+        "pull_request": pr_context(pr),
+        "output_rules": [
+            "If there are no tests, verdict must be none and score should be low.",
+            "Distinguish real assertions from shallow snapshots, mocks, or import-only tests.",
+            "Return JSON only matching the schema.",
+        ],
+    }
+    return run_responses_json(
+        model=model,
+        schema=TEST_REALISM_SCHEMA,
+        input_text=json.dumps(prompt, indent=2, sort_keys=True),
+    )
+
+
+def run_vision_alignment(pr: dict[str, Any], *, vision_config: str, model: str) -> dict[str, Any]:
+    prompt = {
+        "task": "Judge whether this PR aligns with the repository maintainer vision and protected path rules.",
+        "repo_vision_config": vision_config,
+        "pull_request": pr_context(pr),
+        "output_rules": [
+            "Treat protected path violations as review requirements, not automatic rejection.",
+            "Use non_goals to detect vision drift.",
+            "Return JSON only matching the schema.",
+        ],
+    }
+    return run_responses_json(
+        model=model,
+        schema=VISION_ALIGNMENT_SCHEMA,
+        input_text=json.dumps(prompt, indent=2, sort_keys=True),
+    )
+
+
+def run_codex_cluster_label(repo: str, cluster: dict[str, Any], data: dict[str, Any], *, model: str) -> dict[str, Any]:
+    by_number = {
+        pr.get("number"): pr
+        for pr in data.get("prs") or []
+        if isinstance(pr, dict)
+    }
+    prompt = {
+        "task": "Name this duplicate PR cluster for an open-source maintainer dashboard.",
+        "repo": repo,
+        "cluster": {
+            "id": cluster.get("id"),
+            "deterministicLabel": cluster.get("label"),
+            "bestPr": cluster.get("bestPr"),
+            "bestTitle": cluster.get("bestTitle"),
+            "reasons": cluster.get("reasons") or [],
+            "members": [
+                pr_context(by_number[number])
+                for number in cluster.get("prs") or []
+                if number in by_number
+            ],
+        },
+        "output_rules": [
+            "The label should be specific, human-readable, and under 8 words.",
+            "Do not overstate certainty.",
+            "Return JSON only matching the schema.",
+        ],
+    }
+    result = run_codex_json(
+        prompt=json.dumps(prompt, indent=2, sort_keys=True),
+        schema=CLUSTER_LABEL_SCHEMA,
+        model=model,
+    )
+    result["clusterFingerprint"] = cluster_fingerprint(cluster)
+    return result
+
+
 def run_responses_json(*, model: str, schema: dict[str, Any], input_text: str) -> dict[str, Any]:
     env = load_dotenv()
     api_key = env.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
@@ -3400,6 +3908,48 @@ def codex_cache_key(kind: str, prs: list[dict[str, Any]], model: str) -> str:
     numbers = "_".join(str(pr.get("number")) for pr in prs)
     text = "\n".join(pr_fingerprint_text(pr) for pr in prs)
     return f"{model}_{kind}_{numbers}_{sha256_text(text)[:12]}"
+
+
+def llm_changelets_cache_key(pr: dict[str, Any], model: str) -> str:
+    return f"{model}_changelets_pr_{pr.get('number')}_{sha256_text(pr_fingerprint_text(pr))[:12]}"
+
+
+def low_value_cache_key(pr: dict[str, Any], model: str) -> str:
+    return f"{model}_low_value_pr_{pr.get('number')}_{sha256_text(pr_fingerprint_text(pr))[:12]}"
+
+
+def test_realism_cache_key(pr: dict[str, Any], model: str) -> str:
+    return f"{model}_test_realism_pr_{pr.get('number')}_{sha256_text(pr_fingerprint_text(pr))[:12]}"
+
+
+def vision_cache_key(pr: dict[str, Any], vision_config: str, model: str) -> str:
+    key_text = pr_fingerprint_text(pr) + "\nVISION\n" + vision_config
+    return f"{model}_vision_pr_{pr.get('number')}_{sha256_text(key_text)[:12]}"
+
+
+def cluster_label_cache_key(cluster: dict[str, Any], model: str) -> str:
+    return f"{model}_cluster_label_{cluster.get('id')}_{cluster_fingerprint(cluster)[:12]}"
+
+
+def cluster_fingerprint(cluster: dict[str, Any]) -> str:
+    payload = {
+        "prs": sorted(int_or_zero(number) for number in cluster.get("prs") or []),
+        "bestPr": cluster.get("bestPr"),
+        "reasons": cluster.get("reasons") or [],
+    }
+    return sha256_text(json.dumps(payload, sort_keys=True))
+
+
+def read_vision_config(path_text: str | None) -> str:
+    candidates: list[Path] = []
+    if path_text:
+        candidates.append(Path(path_text))
+    else:
+        candidates.extend([Path("pullguard.yml"), Path("pullguard.yaml"), Path(".triage") / "vision.yml"])
+    for path in candidates:
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+    return ""
 
 
 def load_dotenv(path: Path = Path(".env")) -> dict[str, str]:
@@ -3642,6 +4192,170 @@ def print_signal_report(data: dict[str, Any]) -> None:
             )
 
 
+def render_static_html_report(data: dict[str, Any], output: Path) -> None:
+    prs = [pr for pr in data.get("prs") or [] if isinstance(pr, dict)]
+    summary = data.get("signalSummary") or compute_signal_summary(prs)
+    analysis = data.get("analysis") or {}
+    clusters = [cluster for cluster in analysis.get("clusters") or [] if isinstance(cluster, dict)]
+    waves = [wave for wave in analysis.get("floodWaves") or [] if isinstance(wave, dict)]
+    review_queue = [item for item in analysis.get("reviewQueue") or [] if isinstance(item, dict)]
+    top_flags = sorted((summary.get("flagCounts") or {}).items(), key=lambda item: (-item[1], item[0]))[:12]
+    top_changelets = list((summary.get("changeletCounts") or {}).items())[:12]
+
+    def esc(value: Any) -> str:
+        return html.escape("" if value is None else str(value))
+
+    def card(title: str, value: Any, sub: str = "") -> str:
+        return (
+            '<div class="card metric">'
+            f'<div class="label">{esc(title)}</div>'
+            f'<div class="value">{esc(value)}</div>'
+            f'<div class="sub">{esc(sub)}</div>'
+            "</div>"
+        )
+
+    queue_rows = "\n".join(
+        f"""
+        <tr>
+          <td>#{esc(item.get('pr'))}</td>
+          <td>{esc(item.get('title'))}</td>
+          <td><span class="pill">{esc(item.get('bucket'))}</span></td>
+          <td>{esc(item.get('score'))}</td>
+          <td>{esc('; '.join(item.get('reasons') or [])[:160])}</td>
+        </tr>
+        """
+        for item in review_queue[:40]
+    )
+    cluster_cards = "\n".join(
+        f"""
+        <section class="card">
+          <div class="row">
+            <h3>{esc(cluster.get('label'))}</h3>
+            <span class="score">{esc(cluster.get('size'))} PRs</span>
+          </div>
+          <p>Best: #{esc(cluster.get('bestPr'))} {esc(cluster.get('bestTitle'))}</p>
+          <p class="muted">{esc(' · '.join(cluster.get('reasons') or []))}</p>
+        </section>
+        """
+        for cluster in clusters[:16]
+    )
+    wave_cards = "\n".join(
+        f"""
+        <section class="card amber">
+          <div class="row">
+            <h3>{esc(wave.get('label'))}</h3>
+            <span class="score">{esc(wave.get('score'))}</span>
+          </div>
+          <p>{esc(len(wave.get('prs') or []))} PRs over {esc(wave.get('window'))}</p>
+          <p>Review first: #{esc(wave.get('bestPr'))} {esc(wave.get('bestTitle'))}</p>
+          <p class="muted">{esc(wave.get('recommendedAction'))}</p>
+        </section>
+        """
+        for wave in waves[:16]
+    )
+    flag_pills = "".join(f'<span class="pill warn">{esc(flag)} {count}</span>' for flag, count in top_flags)
+    changelet_pills = "".join(f'<span class="pill">{esc(label)} {count}</span>' for label, count in top_changelets)
+
+    document = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pull Guard Report - {esc(data.get('repo', 'unknown'))}</title>
+  <style>
+    :root {{
+      color-scheme: dark;
+      --bg: #050505;
+      --panel: #0b0b0d;
+      --panel2: #101114;
+      --line: #24262d;
+      --text: #f4f4f5;
+      --muted: #9296a3;
+      --cyan: #64d8ff;
+      --amber: #f6c85f;
+      --rose: #ff7b8a;
+      --green: #7ee7b1;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }}
+    main {{ width: min(1600px, calc(100vw - 48px)); margin: 0 auto; padding: 32px 0 56px; }}
+    header {{ border-bottom: 1px solid var(--line); padding: 28px 0; }}
+    h1 {{ margin: 0; font-size: 34px; letter-spacing: -0.02em; }}
+    h2 {{ margin: 34px 0 14px; font-size: 20px; }}
+    h3 {{ margin: 0; font-size: 15px; }}
+    p {{ margin: 8px 0 0; color: var(--muted); }}
+    .grid {{ display: grid; gap: 14px; }}
+    .metrics {{ grid-template-columns: repeat(5, minmax(0, 1fr)); margin-top: 24px; }}
+    .two {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+    .card {{
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, var(--panel), #070708);
+      border-radius: 10px;
+      padding: 16px;
+    }}
+    .amber {{ border-color: rgba(246, 200, 95, 0.28); background: rgba(246, 200, 95, 0.05); }}
+    .label {{ color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em; }}
+    .value {{ margin-top: 8px; font-size: 28px; font-weight: 700; letter-spacing: -0.03em; }}
+    .sub, .muted {{ color: var(--muted); font-size: 13px; }}
+    .row {{ display: flex; align-items: start; justify-content: space-between; gap: 16px; }}
+    .score {{ color: var(--amber); border: 1px solid rgba(246, 200, 95, 0.3); border-radius: 8px; padding: 4px 8px; }}
+    .pills {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+    .pill {{ border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; color: #d5d7de; background: var(--panel2); font-size: 12px; }}
+    .warn {{ border-color: rgba(246, 200, 95, 0.3); color: #ffe3a1; }}
+    table {{ width: 100%; border-collapse: collapse; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; }}
+    th, td {{ border-bottom: 1px solid var(--line); padding: 10px 12px; text-align: left; font-size: 13px; vertical-align: top; }}
+    th {{ color: var(--muted); background: var(--panel2); font-weight: 600; }}
+    tr:last-child td {{ border-bottom: 0; }}
+    @media (max-width: 1100px) {{ .metrics, .two {{ grid-template-columns: 1fr; }} main {{ width: min(100vw - 28px, 900px); }} }}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="label">Pull Guard static report</div>
+      <h1>{esc(data.get('repo', 'unknown'))}</h1>
+      <p>Scanned {esc(data.get('scannedAt', 'unknown'))}. Schema v{esc(data.get('schemaVersion'))}. Source: {esc(data.get('source', 'cache'))}.</p>
+    </header>
+
+    <section class="grid metrics">
+      {card("Pull Requests", len(prs), data.get("state", ""))}
+      {card("Avg Trust", f"{summary.get('averageContributorTrust', 'n/a')}/100", "contributor signal")}
+      {card("Low Value", summary.get("lowValuePrs", 0), "flagged PRs")}
+      {card("Clusters", len(clusters), "duplicate groups")}
+      {card("AI Flood", len(waves), "burst waves")}
+    </section>
+
+    <h2>Signals</h2>
+    <section class="card"><div class="pills">{flag_pills or '<span class="muted">No flags</span>'}</div></section>
+
+    <h2>Changelets</h2>
+    <section class="card"><div class="pills">{changelet_pills or '<span class="muted">No changelets</span>'}</div></section>
+
+    <h2>Review Queue</h2>
+    <table>
+      <thead><tr><th>PR</th><th>Title</th><th>Bucket</th><th>Score</th><th>Reasons</th></tr></thead>
+      <tbody>{queue_rows or '<tr><td colspan="5">No review queue entries.</td></tr>'}</tbody>
+    </table>
+
+    <h2>Duplicate Clusters</h2>
+    <section class="grid two">{cluster_cards or '<section class="card"><p>No duplicate clusters above threshold.</p></section>'}</section>
+
+    <h2>AI Flood Waves</h2>
+    <section class="grid two">{wave_cards or '<section class="card"><p>No AI-flood waves above threshold.</p></section>'}</section>
+  </main>
+</body>
+</html>
+"""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(document, encoding="utf-8")
+
+
 def print_changelets(data: dict[str, Any], *, limit: int) -> None:
     prs = [pr for pr in data.get("prs", []) if isinstance(pr, dict)]
     print("Semantic Changelets")
@@ -3755,6 +4469,13 @@ def int_or_zero(value: Any) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def float_or_zero(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def first_nonempty(values: Any) -> Any:

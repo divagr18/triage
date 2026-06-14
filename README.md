@@ -32,6 +32,10 @@ clear review paths.
 - Compares competing PRs with Codex reasoning.
 - Explains individual PRs with Codex.
 - Scores patch-text alignment with the Responses API.
+- Generates static HTML reports from the local cache.
+- Extracts optional LLM semantic changelets.
+- Generates optional Codex cluster labels.
+- Runs optional low-value, test-realism, and repo-vision classifiers.
 - Produces terminal reports and a Vite frontend dashboard.
 
 ## Quick Start
@@ -64,6 +68,7 @@ Inspect the results:
 
 ```bash
 python triage.py report microsoft/coreutils
+python triage.py report microsoft/coreutils --html
 python triage.py clusters microsoft/coreutils
 python triage.py flood microsoft/coreutils
 python triage.py changelets microsoft/coreutils --limit 10
@@ -77,6 +82,9 @@ python triage.py explain microsoft/coreutils 123
 python triage.py compare microsoft/coreutils 123 456
 python triage.py recommend microsoft/coreutils --limit 10
 python triage.py enrich microsoft/coreutils --align --limit 50
+python triage.py enrich microsoft/coreutils --changelets --classify --prs 123,456
+python triage.py enrich microsoft/coreutils --cluster-labels --limit 20
+python triage.py enrich microsoft/coreutils --vision --vision-config pullguard.yml --limit 20
 ```
 
 Cache files are stored at:
@@ -238,10 +246,43 @@ Pull Guard uses API-backed reasoning where it adds real maintainer value:
 - `compare` judges two competing PRs and identifies the better review target.
 - `recommend` creates a short action plan for risky or high-priority PRs.
 - `enrich` runs alignment, explain, and recommendation jobs in batch.
+- `report --html` writes a standalone `report.html` into the repo cache directory
+  unless `--output` is provided.
+- `enrich --changelets` stores real LLM-generated changelets under
+  `ai/llm_changelets`.
+- `enrich --classify` stores low-value and test-realism classifier outputs under
+  `ai/low_value` and `ai/test_realism`.
+- `enrich --cluster-labels` stores Codex cluster labels under `ai/cluster_label`.
+- `enrich --vision` evaluates PRs against a local maintainer vision file and
+  stores results under `ai/vision_alignment`.
 
 Alignment results feed back into flags, canonical ranking, AI-flood scoring, and
-frontend badges. Deterministic alignment estimates are stored separately and are
-never presented as LLM output.
+frontend badges. LLM changelets and classifier results are cached separately and
+only appear after real provider calls complete. Deterministic alignment estimates
+are stored separately and are never presented as LLM output.
+
+Example vision config:
+
+```yaml
+goals:
+  - improve runtime stability
+  - reduce flaky tests
+  - preserve public API compatibility
+
+non_goals:
+  - README rewrites
+  - new plugin systems
+  - large refactors without issue
+
+protected_paths:
+  lib/**:
+    requires:
+      - tests
+      - linked_issue
+  package.json:
+    requires:
+      - dependency_justification
+```
 
 ## REST And GraphQL
 
@@ -279,6 +320,6 @@ embedding-based duplicate clustering, AI-flood detection, contributor trust,
 canonical ranking, patch-text alignment, Codex explain/compare/recommend, and a
 multi-page frontend dashboard.
 
-Remaining planned work includes generated static HTML reports, LLM-generated
-semantic changelets, LLM cluster labels, repo vision alignment, a stronger
-low-value PR classifier, test realism scoring, and dry-run label/comment plans.
+Remaining planned work includes dry-run label/comment plans, reviewer routing,
+timeline visualizations, natural-language PR search, and a GitHub Action mode
+that posts a report artifact.

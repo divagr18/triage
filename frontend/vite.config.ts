@@ -88,6 +88,9 @@ async function runAiAction(projectRoot: string, repo: string, body: Record<strin
   if (action === 'align' || action === 'explain') {
     const pr = positiveInt(body.pr, 'pr')
     args.push(action, repo, String(pr), '--refresh-ai')
+  } else if (action === 'changelets' || action === 'classify') {
+    const pr = positiveInt(body.pr, 'pr')
+    args.push('enrich', repo, `--${action}`, '--prs', String(pr), '--refresh-ai')
   } else if (action === 'compare') {
     const left = positiveInt(body.left, 'left')
     const right = positiveInt(body.right, 'right')
@@ -140,7 +143,16 @@ function safeSlug(value: string) {
 
 function readAiCache(repoDir: string) {
   const aiRoot = path.join(repoDir, 'ai')
-  const empty = { alignment: {}, explain: {}, recommendations: [], compare: [] }
+  const empty = {
+    alignment: {},
+    explain: {},
+    recommendations: [],
+    compare: [],
+    changelets: {},
+    lowValue: {},
+    testRealism: {},
+    vision: {},
+  }
   if (!fs.existsSync(aiRoot)) return empty
 
   return {
@@ -148,6 +160,10 @@ function readAiCache(repoDir: string) {
     explain: indexByPr(readJsonFiles(path.join(aiRoot, 'codex_explain'))),
     recommendations: readJsonFiles(path.join(aiRoot, 'codex_recommend')).sort(sortByCachedAt),
     compare: readJsonFiles(path.join(aiRoot, 'codex_compare')).sort(sortByCachedAt),
+    changelets: indexByPr(readJsonFiles(path.join(aiRoot, 'llm_changelets'))),
+    lowValue: indexByPr(readJsonFiles(path.join(aiRoot, 'low_value'))),
+    testRealism: indexByPr(readJsonFiles(path.join(aiRoot, 'test_realism'))),
+    vision: indexByPr(readJsonFiles(path.join(aiRoot, 'vision_alignment'))),
   }
 }
 

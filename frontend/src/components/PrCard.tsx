@@ -64,6 +64,26 @@ export function PrCard({ pr, selected, aiAlignment, aiExplain, onClick }: Props)
                 Codex
               </span>
             )}
+            {pr.llmChangelets && (
+              <span className="rounded-md border border-cyan-400/20 bg-cyan-400/[0.08] px-2 py-0.5 text-xs text-cyan-200">
+                LLM changelets
+              </span>
+            )}
+            {pr.ml?.lowValue && (
+              <span className="rounded-md border border-amber-400/20 bg-amber-400/[0.08] px-2 py-0.5 text-xs text-amber-200">
+                ML {pr.ml.lowValue.category?.replace(/_/g, ' ')}
+              </span>
+            )}
+            {pr.ml?.testRealism && (
+              <span className="rounded-md border border-emerald-400/20 bg-emerald-400/[0.08] px-2 py-0.5 text-xs text-emerald-200">
+                tests {pr.ml.testRealism.verdict}
+              </span>
+            )}
+            {pr.ml?.vision && (
+              <span className="rounded-md border border-fuchsia-400/20 bg-fuchsia-400/[0.08] px-2 py-0.5 text-xs text-fuchsia-200">
+                vision {pr.ml.vision.verdict}
+              </span>
+            )}
             {pr.recommendation && (
               <span className="rounded-md border border-emerald-400/20 bg-emerald-400/[0.08] px-2 py-0.5 text-xs text-emerald-200">
                 {pr.recommendation.bucket.replace(/_/g, ' ')}

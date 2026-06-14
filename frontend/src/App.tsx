@@ -132,8 +132,8 @@ export default function App() {
         ) : !data ? (
           <EmptyState />
         ) : (
-          <div className="mx-auto flex max-w-[1800px] flex-col gap-5 px-5 py-5 sm:px-6 lg:px-8">
-            <div className="grid gap-5 xl:grid-cols-[240px_minmax(0,1fr)]">
+          <div className="flex w-full flex-col gap-5 px-5 py-5 sm:px-6 lg:px-8">
+            <div className="grid w-full gap-5 xl:grid-cols-[260px_minmax(0,1fr)]">
               <Sidebar
                 active={page}
                 onChange={setPage}
@@ -150,19 +150,26 @@ export default function App() {
                     <ScanHeader data={data} />
                     <Metrics data={data} floodWaves={floodWaves} />
                     <CommandStrip data={data} />
-                    <section>
-                      <div className="mb-4">
-                        <h2 className="text-lg font-semibold tracking-tight text-zinc-50">Signals</h2>
-                        <p className="mt-1 text-sm text-zinc-400">
-                          File mix and deterministic flags for the current scan.
-                        </p>
+                    <section className="surface rounded-lg p-4 sm:p-5">
+                      <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+                        <div>
+                          <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-zinc-400">
+                            Signal surface
+                          </h2>
+                          <p className="mt-1 text-sm text-zinc-500">
+                            File mix and deterministic flags folded into the current scan.
+                          </p>
+                        </div>
+                        <div className="text-xs text-zinc-600">
+                          {Object.keys(data.signalSummary.flagCounts).length} flag types
+                        </div>
                       </div>
-                      <div className="grid gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
-                        <FileBucketsChart summary={data.signalSummary} />
-                        <FlagsList summary={data.signalSummary} />
+                      <div className="grid gap-4 xl:grid-cols-[minmax(360px,0.95fr)_minmax(0,1.05fr)]">
+                        <FileBucketsChart summary={data.signalSummary} embedded />
+                        <FlagsList summary={data.signalSummary} embedded />
                       </div>
                     </section>
-                    <div className="grid gap-5 xl:grid-cols-2">
+                    <div className="grid gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
                       <FocusQueue
                         prs={data.prs}
                         onSelect={selectPr}
@@ -184,7 +191,7 @@ export default function App() {
                 )}
 
                 {page === 'queue' && (
-                  <div className="max-w-5xl">
+                  <div className="w-full">
                     <PageHeader
                       title="Review Queue"
                       description="Search, sort, and filter cached pull requests without the overview noise."

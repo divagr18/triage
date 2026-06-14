@@ -13,14 +13,15 @@ const BUCKET_META: Record<string, { label: string; color: string }> = {
 
 interface Props {
   summary: SignalSummary
+  embedded?: boolean
 }
 
-export function FileBucketsChart({ summary }: Props) {
+export function FileBucketsChart({ summary, embedded = false }: Props) {
   const buckets = Object.entries(summary.fileBucketCounts).sort((a, b) => b[1] - a[1])
   const total = buckets.reduce((sum, [, count]) => sum + count, 0)
 
   return (
-    <section className="surface-soft rounded-lg p-4">
+    <section className={embedded ? 'min-w-0' : 'surface-soft rounded-lg p-4'}>
       <div className="mb-4">
         <h3 className="text-sm font-semibold text-white">File buckets</h3>
         <p className="mt-1 text-xs text-zinc-500">Touched file categories</p>
@@ -29,7 +30,7 @@ export function FileBucketsChart({ summary }: Props) {
         <p className="text-sm text-zinc-500">No file data available.</p>
       ) : (
         <div className="space-y-4">
-          <div className="flex h-2 w-full overflow-hidden rounded bg-zinc-900">
+          <div className="flex h-2.5 w-full overflow-hidden rounded-full bg-zinc-900">
             {buckets.map(([key, count]) => {
               const pct = (count / total) * 100
               const meta = BUCKET_META[key] || { label: key, color: 'bg-zinc-700' }
@@ -43,7 +44,7 @@ export function FileBucketsChart({ summary }: Props) {
               )
             })}
           </div>
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-2 gap-2 2xl:grid-cols-4">
             {buckets.map(([key, count]) => {
               const meta = BUCKET_META[key] || { label: key, color: 'bg-zinc-700' }
               const pct = (count / total) * 100

@@ -92,7 +92,11 @@ export function PrList({ prs, selected, onSelect, floodPrNumbers, pageMode = fal
         </div>
       </div>
 
-      <div className="space-y-4 overflow-y-auto pr-2 xl:min-h-0 xl:flex-1">
+      <div
+        className={`overflow-y-auto pr-2 xl:min-h-0 xl:flex-1 ${
+          pageMode ? 'grid content-start gap-4 xl:grid-cols-2 2xl:grid-cols-3' : 'space-y-4'
+        }`}
+      >
         {filtered.map((pr) => (
           <PrCard
             key={pr.number}

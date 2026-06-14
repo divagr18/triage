@@ -516,6 +516,91 @@ class PhaseOneTests(unittest.TestCase):
         self.assertEqual(trust["bucket"], "very_low")
         self.assertTrue(trust["risks"])
 
+    def test_ai_flood_detects_low_context_burst(self):
+        prs = []
+        for number, hour in [(10, "00"), (11, "08"), (12, "16")]:
+            pr = {
+                "number": number,
+                "title": "Update README docs",
+                "body": "",
+                "createdAt": f"2026-06-01T{hour}:00:00Z",
+                "additions": 4,
+                "deletions": 0,
+                "changedFiles": 1,
+                "checks": [],
+                "reviews": [],
+                "files": [{"filename": "README.md", "patch": "@@\n+small cleanup"}],
+                "contributor": {
+                    "accountAssociation": "FIRST_TIMER",
+                    "priorMergedPrs": 0,
+                    "currentOpenPrs": 1,
+                    "currentOpenPrsInScan": 1,
+                },
+            }
+            pr["signals"] = triage.compute_pr_signals(pr)
+            pr["flags"] = triage.compute_pr_flags(pr)
+            pr["changelets"] = triage.extract_changelets(pr)
+            pr["contributorTrust"] = triage.compute_contributor_trust(pr)
+            prs.append(pr)
+
+        with patch("triage.build_duplicate_clusters", return_value=[]):
+            waves = triage.build_ai_flood_waves(
+                "owner/repo",
+                prs,
+                since=None,
+                window_hours=24,
+                min_size=3,
+                threshold=0.55,
+                cluster_threshold=0.62,
+                model_name="test-model",
+            )
+
+        self.assertEqual(len(waves), 1)
+        self.assertEqual(waves[0]["prs"], [10, 11, 12])
+        self.assertGreaterEqual(waves[0]["score"], 0.55)
+        self.assertTrue(waves[0]["recommendedAction"])
+
+    def test_ai_flood_rejects_old_spread_out_repetition(self):
+        prs = []
+        for number, day in [(10, "01"), (11, "12"), (12, "24")]:
+            pr = {
+                "number": number,
+                "title": "Update README docs",
+                "body": "",
+                "createdAt": f"2026-06-{day}T00:00:00Z",
+                "additions": 4,
+                "deletions": 0,
+                "changedFiles": 1,
+                "checks": [],
+                "reviews": [],
+                "files": [{"filename": "README.md", "patch": "@@\n+small cleanup"}],
+                "contributor": {
+                    "accountAssociation": "FIRST_TIMER",
+                    "priorMergedPrs": 0,
+                    "currentOpenPrs": 1,
+                    "currentOpenPrsInScan": 1,
+                },
+            }
+            pr["signals"] = triage.compute_pr_signals(pr)
+            pr["flags"] = triage.compute_pr_flags(pr)
+            pr["changelets"] = triage.extract_changelets(pr)
+            pr["contributorTrust"] = triage.compute_contributor_trust(pr)
+            prs.append(pr)
+
+        with patch("triage.build_duplicate_clusters", return_value=[]):
+            waves = triage.build_ai_flood_waves(
+                "owner/repo",
+                prs,
+                since=None,
+                window_hours=72,
+                min_size=3,
+                threshold=0.55,
+                cluster_threshold=0.62,
+                model_name="test-model",
+            )
+
+        self.assertEqual(waves, [])
+
 
 if __name__ == "__main__":
     unittest.main()

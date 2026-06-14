@@ -133,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
             changelets_command(args)
         elif args.command == "clusters":
             clusters_command(args)
+        elif args.command == "flood":
+            flood_command(args)
         elif args.command == "cache-path":
             print(cache_path_for_repo(args.repo))
         else:
@@ -184,6 +186,17 @@ def build_parser() -> argparse.ArgumentParser:
     clusters.add_argument("--limit", type=positive_int, default=20)
     clusters.add_argument("--model", default=DEFAULT_EMBEDDING_MODEL)
     clusters.add_argument("--refresh-embeddings", action="store_true")
+
+    flood = subcommands.add_parser("flood", help="detect likely AI-flood PR waves from cache")
+    flood.add_argument("repo", help="repository in owner/repo form")
+    flood.add_argument("--since", help="created-at lower bound, for example 2026-05-01")
+    flood.add_argument("--window-hours", type=positive_int, default=72)
+    flood.add_argument("--min-size", type=positive_int, default=3)
+    flood.add_argument("--threshold", type=float, default=0.55)
+    flood.add_argument("--cluster-threshold", type=float, default=0.62)
+    flood.add_argument("--limit", type=positive_int, default=20)
+    flood.add_argument("--model", default=DEFAULT_EMBEDDING_MODEL)
+    flood.add_argument("--refresh-embeddings", action="store_true")
 
     cache_path = subcommands.add_parser("cache-path", help="print cache file path for a repo")
     cache_path.add_argument("repo", help="repository in owner/repo form")
@@ -257,6 +270,25 @@ def clusters_command(args: argparse.Namespace) -> None:
         refresh_embeddings=args.refresh_embeddings,
     )
     print_clusters(data, limit=args.limit)
+
+
+def flood_command(args: argparse.Namespace) -> None:
+    validate_repo(args.repo)
+    data = read_cache(cache_path_for_repo(args.repo))
+    attach_deterministic_signals(data)
+    waves = build_ai_flood_waves(
+        args.repo,
+        data.get("prs") or [],
+        since=args.since,
+        window_hours=args.window_hours,
+        min_size=args.min_size,
+        threshold=args.threshold,
+        cluster_threshold=args.cluster_threshold,
+        model_name=args.model,
+        refresh_embeddings=args.refresh_embeddings,
+    )
+    data["floodWaves"] = waves
+    print_flood_waves(data, waves, limit=args.limit)
 
 
 def scan_github(args: ScanArgs) -> dict[str, Any]:
@@ -949,6 +981,326 @@ def build_duplicate_clusters(
             }
         )
     return sorted(clusters, key=lambda cluster: (-cluster["size"], -cluster["averageSimilarity"], cluster["id"]))
+
+
+def build_ai_flood_waves(
+    repo: str,
+    prs: list[Any],
+    *,
+    since: str | None,
+    window_hours: int,
+    min_size: int,
+    threshold: float,
+    cluster_threshold: float,
+    model_name: str,
+    refresh_embeddings: bool = False,
+) -> list[dict[str, Any]]:
+    real_prs = [
+        pr
+        for pr in prs
+        if isinstance(pr, dict) and parse_pr_datetime(pr.get("createdAt")) is not None
+    ]
+    if since:
+        real_prs = [pr for pr in real_prs if iso_date_at_or_after(pr.get("createdAt"), since)]
+    if len(real_prs) < min_size:
+        return []
+
+    clusters = build_duplicate_clusters(
+        repo,
+        real_prs,
+        threshold=cluster_threshold,
+        model_name=model_name,
+        refresh_embeddings=refresh_embeddings,
+    )
+
+    candidates: dict[tuple[int, ...], tuple[str, str, list[dict[str, Any]]]] = {}
+
+    def add_candidate(label: str, source: str, group: list[dict[str, Any]]) -> None:
+        numbers = tuple(sorted(int_or_zero(pr.get("number")) for pr in group if pr.get("number") is not None))
+        if len(numbers) < min_size or numbers in candidates:
+            return
+        candidates[numbers] = (label, source, group)
+
+    pr_by_number = {pr.get("number"): pr for pr in real_prs}
+    for cluster in clusters:
+        cluster_prs = [pr_by_number.get(number) for number in cluster.get("prs") or []]
+        cluster_prs = [pr for pr in cluster_prs if isinstance(pr, dict)]
+        for window in time_window_groups(cluster_prs, window_hours=window_hours, min_size=min_size):
+            add_candidate(str(cluster.get("label") or "semantic duplicate wave"), "semantic_cluster", window)
+
+    anchor_groups: dict[str, list[dict[str, Any]]] = {}
+    for pr in real_prs:
+        for anchor in flood_anchors_for_pr(pr):
+            anchor_groups.setdefault(anchor, []).append(pr)
+
+    for anchor, group in anchor_groups.items():
+        if len(group) < min_size:
+            continue
+        for window in time_window_groups(group, window_hours=window_hours, min_size=min_size):
+            add_candidate(anchor_label(anchor), "repeated_signal", window)
+
+    waves: list[dict[str, Any]] = []
+    for label, source, group in candidates.values():
+        wave = score_flood_wave(label, source, group)
+        if wave["score"] >= threshold:
+            waves.append(wave)
+
+    return dedupe_flood_waves(sorted(waves, key=lambda wave: (-wave["score"], -len(wave["prs"]), wave["id"])))
+
+
+def time_window_groups(
+    prs: list[dict[str, Any]],
+    *,
+    window_hours: int,
+    min_size: int,
+) -> list[list[dict[str, Any]]]:
+    dated = sorted(
+        [(parse_pr_datetime(pr.get("createdAt")), pr) for pr in prs],
+        key=lambda item: item[0] or datetime.max.replace(tzinfo=timezone.utc),
+    )
+    dated = [(date, pr) for date, pr in dated if date is not None]
+    groups: list[list[dict[str, Any]]] = []
+    seen: set[tuple[int, ...]] = set()
+    for start_index, (start, _) in enumerate(dated):
+        group = [
+            pr
+            for date, pr in dated[start_index:]
+            if start and date and hours_between(start, date) <= window_hours
+        ]
+        if len(group) < min_size:
+            continue
+        numbers = tuple(sorted(int_or_zero(pr.get("number")) for pr in group))
+        if numbers in seen:
+            continue
+        seen.add(numbers)
+        groups.append(group)
+    return groups
+
+
+def flood_anchors_for_pr(pr: dict[str, Any]) -> list[str]:
+    signals = pr.get("signals") or {}
+    anchors: list[str] = []
+    for changelet in pr.get("changelets") or []:
+        if changelet.startswith("touch "):
+            continue
+        if changelet in {"edit README only", "update documentation", "modify dependency metadata"}:
+            anchors.append(f"changelet:{changelet}")
+        elif changelet not in GENERIC_CLUSTER_CHANGELETS:
+            anchors.append(f"changelet:{changelet}")
+
+    for filename in signals.get("fileNames") or []:
+        normalized = normalize_path(filename)
+        if normalized in {"readme.md", "history.md", "changelog.md"} or is_specific_cluster_file(normalized):
+            anchors.append(f"file:{normalized}")
+
+    signature = title_signature(pr.get("title") or "")
+    if signature:
+        anchors.append(f"title:{signature}")
+    return unique_strings(anchors)
+
+
+def title_signature(title: str) -> str:
+    words = [
+        word
+        for word in re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", title.lower())
+        if word not in STOP_WORDS and word not in {"fix", "feat", "docs", "chore", "pr"}
+    ]
+    if len(words) < 2:
+        return ""
+    return " ".join(words[:4])
+
+
+def anchor_label(anchor: str) -> str:
+    kind, _, value = anchor.partition(":")
+    if kind == "file":
+        return f"Repeated edits to {value}"
+    if kind == "title":
+        return f"Repeated title intent: {value}"
+    return value
+
+
+def score_flood_wave(label: str, source: str, prs: list[dict[str, Any]]) -> dict[str, Any]:
+    dates = [parse_pr_datetime(pr.get("createdAt")) for pr in prs]
+    dates = [date for date in dates if date is not None]
+    duration = hours_between(min(dates), max(dates)) if dates else 0.0
+    count = len(prs)
+    first_time = sum(1 for pr in prs if (pr.get("signals") or {}).get("isNewContributor"))
+    low_context = sum(1 for pr in prs if is_low_context_pr(pr))
+    docs_only = sum(1 for pr in prs if (pr.get("signals") or {}).get("docsOnly"))
+    small_diff = sum(1 for pr in prs if (pr.get("signals") or {}).get("smallDiff"))
+    no_review = sum(1 for pr in prs if (pr.get("signals") or {}).get("reviewState") == "none")
+    low_trust = sum(1 for pr in prs if int_or_zero((pr.get("contributorTrust") or {}).get("score")) < 55)
+    repeated_files = top_repeated_count(
+        filename
+        for pr in prs
+        for filename in (pr.get("signals") or {}).get("fileNames") or []
+    )
+    repeated_changelets = top_repeated_count(
+        changelet
+        for pr in prs
+        for changelet in pr.get("changelets") or []
+    )
+    repeated_titles = top_repeated_count(title_signature(pr.get("title") or "") for pr in prs)
+
+    score = 0.0
+    score += min(0.25, 0.05 * count)
+    if duration <= 36:
+        score += 0.18
+    elif duration <= 72:
+        score += 0.12
+    elif duration <= 168:
+        score += 0.05
+    score += 0.18 * ratio(low_context, count)
+    score += 0.15 * ratio(first_time, count)
+    score += 0.12 * ratio(max(repeated_files, repeated_changelets, repeated_titles), count)
+    score += 0.10 * ratio(docs_only, count)
+    score += 0.08 * ratio(small_diff, count)
+    score += 0.06 * ratio(no_review, count)
+    score += 0.08 * ratio(low_trust, count)
+    if source == "semantic_cluster":
+        score += 0.10
+    score = round(min(score, 1.0), 3)
+
+    reasons = flood_reasons(
+        count=count,
+        duration=duration,
+        first_time=first_time,
+        low_context=low_context,
+        docs_only=docs_only,
+        small_diff=small_diff,
+        no_review=no_review,
+        low_trust=low_trust,
+        repeated_files=repeated_files,
+        repeated_changelets=repeated_changelets,
+        repeated_titles=repeated_titles,
+        source=source,
+    )
+    best = max(prs, key=canonical_score)
+    return {
+        "id": flood_id(label, prs),
+        "label": label,
+        "prs": [pr.get("number") for pr in sorted(prs, key=lambda pr: parse_pr_datetime(pr.get("createdAt")) or datetime.max.replace(tzinfo=timezone.utc))],
+        "score": score,
+        "window": format_hours(duration),
+        "source": source,
+        "bestPr": best.get("number"),
+        "bestTitle": best.get("title"),
+        "reasons": reasons,
+        "recommendedAction": flood_recommendation(score, source),
+        "metrics": {
+            "firstTimeContributors": first_time,
+            "lowContextPrs": low_context,
+            "docsOnlyPrs": docs_only,
+            "smallDiffPrs": small_diff,
+            "noReviewPrs": no_review,
+            "lowTrustPrs": low_trust,
+        },
+    }
+
+
+def dedupe_flood_waves(waves: list[dict[str, Any]], max_overlap: float = 0.55) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    for wave in waves:
+        if all(flood_wave_overlap(wave, existing) <= max_overlap for existing in selected):
+            selected.append(wave)
+    return selected
+
+
+def flood_wave_overlap(left: dict[str, Any], right: dict[str, Any]) -> float:
+    left_numbers = {number for number in left.get("prs") or [] if number is not None}
+    right_numbers = {number for number in right.get("prs") or [] if number is not None}
+    if not left_numbers or not right_numbers:
+        return 0.0
+    return len(left_numbers & right_numbers) / min(len(left_numbers), len(right_numbers))
+
+
+def flood_reasons(**values: Any) -> list[str]:
+    count = int_or_zero(values.get("count"))
+    reasons = [f"{count} PRs over {format_hours(float(values.get('duration') or 0))}"]
+    if values.get("source") == "semantic_cluster":
+        reasons.append("semantic duplicate cluster overlap")
+    for key, label in [
+        ("first_time", "mostly new or unknown contributors"),
+        ("low_context", "low-context or low-value PR signals"),
+        ("docs_only", "docs-only edits"),
+        ("small_diff", "small shallow diffs"),
+        ("no_review", "no human review"),
+        ("low_trust", "low contributor trust scores"),
+    ]:
+        amount = int_or_zero(values.get(key))
+        if amount >= max(2, count // 2):
+            reasons.append(f"{amount} {label}")
+    if int_or_zero(values.get("repeated_files")) >= max(2, count // 2):
+        reasons.append("repeated touched files")
+    if int_or_zero(values.get("repeated_changelets")) >= max(2, count // 2):
+        reasons.append("repeated semantic changelets")
+    if int_or_zero(values.get("repeated_titles")) >= max(2, count // 2):
+        reasons.append("near-duplicate title intent")
+    return reasons[:8]
+
+
+def is_low_context_pr(pr: dict[str, Any]) -> bool:
+    flags = set(pr.get("flags") or [])
+    signals = pr.get("signals") or {}
+    return bool(
+        flags & LOW_VALUE_FLAGS
+        or "possible_ai_flood_member" in flags
+        or signals.get("genericDescription")
+        or signals.get("descriptionLength", 0) < 80
+    )
+
+
+def top_repeated_count(values: Any) -> int:
+    counts: dict[str, int] = {}
+    for value in values:
+        if not value:
+            continue
+        normalized = str(value).lower()
+        counts[normalized] = counts.get(normalized, 0) + 1
+    return max(counts.values(), default=0)
+
+
+def ratio(part: int, whole: int) -> float:
+    return part / whole if whole else 0.0
+
+
+def flood_id(label: str, prs: list[dict[str, Any]]) -> str:
+    numbers = "_".join(str(pr.get("number")) for pr in sorted(prs, key=lambda pr: int_or_zero(pr.get("number"))))
+    base = safe_segment(re.sub(r"\s+", "_", label.lower()))[:36].strip("_") or "wave"
+    digest = sha256_text(numbers)[:8]
+    return f"flood_{base}_{digest}"
+
+
+def flood_recommendation(score: float, source: str) -> str:
+    if source == "semantic_cluster" and score >= 0.7:
+        return "Review the best canonical PR first; bulk-label the rest duplicate or needs-info if intent matches."
+    if score >= 0.7:
+        return "Sample the wave, identify a canonical PR, then apply a consistent maintainer action."
+    return "Review as a possible burst; ask for clearer issue/context before taking bulk action."
+
+
+def parse_pr_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def hours_between(start: datetime, end: datetime) -> float:
+    return max(0.0, (end - start).total_seconds() / 3600)
+
+
+def format_hours(hours: float) -> str:
+    if hours < 1:
+        return "<1 hour"
+    if hours < 48:
+        return f"{round(hours)} hours"
+    return f"{round(hours / 24, 1)} days"
 
 
 def get_pr_embeddings(
@@ -1671,6 +2023,32 @@ def print_clusters(data: dict[str, Any], *, limit: int) -> None:
                 f"- #{member.get('number')} {member.get('canonicalScore')}/100 "
                 f"sim {member.get('similarityToBest')}: {member.get('title')}{suffix}"
             )
+        print()
+
+
+def print_flood_waves(data: dict[str, Any], waves: list[dict[str, Any]], *, limit: int) -> None:
+    print("AI Flood Waves")
+    print("---------------")
+    print(f"Repo: {data.get('repo', 'unknown')}")
+    print(f"Waves: {len(waves)}")
+    print()
+    if not waves:
+        print("No AI-flood waves above the selected threshold.")
+        return
+
+    for wave in waves[:limit]:
+        print(
+            f"{wave.get('id')} - {wave.get('label')} "
+            f"({len(wave.get('prs') or [])} PRs, score {wave.get('score')}, {wave.get('window')})"
+        )
+        print(f"Best candidate: #{wave.get('bestPr')} {wave.get('bestTitle')}")
+        print(f"PRs: {', '.join('#' + str(number) for number in wave.get('prs') or [])}")
+        reasons = wave.get("reasons") or []
+        if reasons:
+            print("Reasons:")
+            for reason in reasons:
+                print(f"- {reason}")
+        print(f"Recommended action: {wave.get('recommendedAction')}")
         print()
 
 

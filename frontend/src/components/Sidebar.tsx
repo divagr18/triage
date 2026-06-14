@@ -1,4 +1,4 @@
-export type PageKey = 'overview' | 'queue' | 'flood' | 'stats'
+export type PageKey = 'overview' | 'queue' | 'flood' | 'stats' | 'settings'
 
 interface Props {
   active: PageKey
@@ -19,6 +19,7 @@ const ITEMS: Array<{
   { key: 'queue', label: 'Queue', description: 'PR worklist' },
   { key: 'flood', label: 'AI Flood', description: 'burst waves' },
   { key: 'stats', label: 'Stats', description: 'clusters/trends' },
+  { key: 'settings', label: 'Settings', description: 'local controls' },
 ]
 
 export function Sidebar({ active, onChange, counts }: Props) {

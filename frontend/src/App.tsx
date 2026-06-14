@@ -11,8 +11,9 @@ import { PrList } from './components/PrList'
 import { PrDetail } from './components/PrDetail'
 import { Sidebar, type PageKey } from './components/Sidebar'
 import { StatsPage } from './components/StatsPage'
+import { SettingsPage } from './components/SettingsPage'
 import { useRepos, useRepoData } from './useTriageData'
-import type { PullRequest, TriageCache } from './types'
+import type { FloodWave, PrCluster, PullRequest, SignalSummary, TriageCache } from './types'
 import { buildAiFloodWaves, buildFloodClusters, buildPrClusters, buildTrendReport } from './utils'
 
 function EmptyState() {
@@ -102,6 +103,174 @@ function PageHeader({ title, description }: { title: string; description: string
   )
 }
 
+const LOW_VALUE_FLAGS = new Set([
+  'readme_only_noise',
+  'docs_rewrite_noise',
+  'dependency_without_usage',
+  'lockfile_only',
+  'formatting_churn',
+  'test_only_mock_inflation',
+  'description_too_generic',
+  'patch_text_mismatch',
+  'claim_tests_missing',
+  'claim_perf_but_formatting',
+])
+
+function normalizeLogin(value: string | null | undefined) {
+  return (value ?? '').trim().replace(/^@/, '').toLowerCase()
+}
+
+function excludedStorageKey(slug: string | null) {
+  return `triage.excludedUsers.${slug ?? 'default'}`
+}
+
+function readExcludedUsers(slug: string | null) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(excludedStorageKey(slug)) ?? '[]')
+    if (!Array.isArray(parsed)) return []
+    return [...new Set(parsed.map((item) => normalizeLogin(String(item))).filter(Boolean))].sort()
+  } catch {
+    return []
+  }
+}
+
+function summarizePrs(prs: PullRequest[]): SignalSummary {
+  const flagCounts: Record<string, number> = {}
+  const fileBucketCounts: Record<string, number> = {
+    code: 0,
+    tests: 0,
+    docs: 0,
+    config: 0,
+    lockfile: 0,
+    generated: 0,
+    other: 0,
+  }
+  let lowValuePrs = 0
+  let riskyNewContributorPrs = 0
+  let lowTrustPrs = 0
+  let trustTotal = 0
+
+  prs.forEach((pr) => {
+    let hasLowValueFlag = false
+    pr.flags.forEach((flag) => {
+      flagCounts[flag] = (flagCounts[flag] ?? 0) + 1
+      if (LOW_VALUE_FLAGS.has(flag)) hasLowValueFlag = true
+    })
+    Object.entries(pr.signals.fileBuckets).forEach(([bucket, count]) => {
+      fileBucketCounts[bucket] = (fileBucketCounts[bucket] ?? 0) + count
+    })
+    if (hasLowValueFlag) lowValuePrs += 1
+    if (pr.flags.includes('new_contributor_high_risk')) riskyNewContributorPrs += 1
+    if (pr.contributorTrust.score < 45) lowTrustPrs += 1
+    trustTotal += pr.contributorTrust.score
+  })
+
+  return {
+    flagCounts,
+    fileBucketCounts,
+    lowValuePrs,
+    riskyNewContributorPrs,
+    lowTrustPrs,
+    averageContributorTrust: prs.length ? trustTotal / prs.length : null,
+  }
+}
+
+function applyExcludedUsers(prs: PullRequest[], excludedUsers: Set<string>) {
+  if (excludedUsers.size === 0) return prs
+  return prs.map((pr) => {
+    if (!excludedUsers.has(normalizeLogin(pr.author.login))) return pr
+    return {
+      ...pr,
+      flags: [],
+      signals: {
+        ...pr.signals,
+        reviewState: 'excluded',
+      },
+      contributorTrust: {
+        ...pr.contributorTrust,
+        bucket: 'high' as const,
+        score: Math.max(pr.contributorTrust.score, 100),
+        positives: ['Excluded in local trusted-user settings', ...pr.contributorTrust.positives],
+        risks: [],
+        explanation: 'Excluded in local trusted-user settings.',
+      },
+      recommendation: {
+        bucket: 'excluded',
+        score: 100,
+        confidence: 1,
+        reasons: ['Excluded in local trusted-user settings'],
+        risks: [],
+        scoreBreakdown: {},
+      },
+      alignment: pr.alignment
+        ? {
+            ...pr.alignment,
+            signals: [],
+          }
+        : pr.alignment,
+    }
+  })
+}
+
+function filterWavesForExcluded(
+  waves: FloodWave[],
+  excludedUsers: Set<string>,
+  sourcePrs: PullRequest[],
+) {
+  if (excludedUsers.size === 0) return waves
+  const byNumber = new Map(sourcePrs.map((pr) => [pr.number, pr]))
+  return waves
+    .map((wave) => {
+      const prs = wave.prs.filter((number) => {
+        const pr = byNumber.get(number)
+        return pr ? !excludedUsers.has(normalizeLogin(pr.author.login)) : true
+      })
+      const members = wave.members?.filter((member) => prs.includes(member.number))
+      if (prs.length === wave.prs.length) return wave
+      const bestPr = prs.includes(wave.bestPr) ? wave.bestPr : prs[0]
+      const best = bestPr ? byNumber.get(bestPr) : null
+      const originPr = wave.originPr && prs.includes(wave.originPr) ? wave.originPr : null
+      return {
+        ...wave,
+        prs,
+        members,
+        bestPr: bestPr ?? wave.bestPr,
+        bestTitle: best?.title ?? wave.bestTitle,
+        originPr,
+      }
+    })
+    .filter((wave) => wave.prs.length >= 3)
+}
+
+function filterClustersForExcluded(
+  clusters: PrCluster[],
+  excludedUsers: Set<string>,
+  sourcePrs: PullRequest[],
+) {
+  if (excludedUsers.size === 0) return clusters
+  const byNumber = new Map(sourcePrs.map((pr) => [pr.number, pr]))
+  return clusters
+    .map((cluster) => {
+      const prs = cluster.prs.filter((number) => {
+        const pr = byNumber.get(number)
+        return pr ? !excludedUsers.has(normalizeLogin(pr.author.login)) : true
+      })
+      const members = cluster.members?.filter((member) => prs.includes(member.number))
+      if (prs.length === cluster.prs.length) return cluster
+      const bestPr = prs.includes(cluster.bestPr) ? cluster.bestPr : prs[0]
+      const best = bestPr ? byNumber.get(bestPr) : null
+      return {
+        ...cluster,
+        prs,
+        members,
+        size: prs.length,
+        bestPr: bestPr ?? cluster.bestPr,
+        bestTitle: best?.title ?? cluster.bestTitle,
+      }
+    })
+    .filter((cluster) => cluster.prs.length >= 2)
+}
+
 export default function App() {
   const { repos, loading: loadingRepos } = useRepos()
   const [selectedSlugOverride, setSelectedSlugOverride] = useState<string | null>(null)
@@ -114,24 +283,75 @@ export default function App() {
   const [page, setPage] = useState<PageKey>('overview')
   const [runningReviewPlan, setRunningReviewPlan] = useState(false)
   const [reviewPlanError, setReviewPlanError] = useState<string | null>(null)
+  const [excludedUsersBySlug, setExcludedUsersBySlug] = useState<Record<string, string[]>>({})
 
-  const selectedPr = selectedPrState?.repoSlug === selectedSlug ? selectedPrState.pr : null
-  const selectPr = (pr: PullRequest) => setSelectedPrState({ repoSlug: selectedSlug, pr })
+  const excludedUsers = useMemo(
+    () => excludedUsersBySlug[selectedSlug ?? 'default'] ?? readExcludedUsers(selectedSlug),
+    [excludedUsersBySlug, selectedSlug],
+  )
+  const excludedUserSet = useMemo(() => new Set(excludedUsers.map(normalizeLogin)), [excludedUsers])
+  const effectivePrs = useMemo(
+    () => (data ? applyExcludedUsers(data.prs, excludedUserSet) : []),
+    [data, excludedUserSet],
+  )
+  const effectiveSummary = useMemo(() => summarizePrs(effectivePrs), [effectivePrs])
+  const effectiveData = useMemo(
+    () => (data ? { ...data, prs: effectivePrs, signalSummary: effectiveSummary } : null),
+    [data, effectivePrs, effectiveSummary],
+  )
   const floodWaves = useMemo(
-    () => (data ? data.analysis?.floodWaves ?? buildAiFloodWaves(data.prs) : []),
-    [data],
+    () =>
+      data
+        ? filterWavesForExcluded(
+            data.analysis?.floodWaves ?? buildAiFloodWaves(effectivePrs),
+            excludedUserSet,
+            data.prs,
+          )
+        : [],
+    [data, effectivePrs, excludedUserSet],
   )
   const floodClusters = useMemo(
-    () => (data ? data.analysis?.clusters ?? buildFloodClusters(data.prs, floodWaves) : []),
-    [data, floodWaves],
+    () =>
+      data
+        ? filterClustersForExcluded(
+            data.analysis?.clusters ?? buildFloodClusters(effectivePrs, floodWaves),
+            excludedUserSet,
+            data.prs,
+          )
+        : [],
+    [data, effectivePrs, excludedUserSet, floodWaves],
   )
-  const clusters = useMemo(() => (data ? data.analysis?.clusters ?? buildPrClusters(data.prs) : []), [data])
-  const trends = useMemo(() => (data ? buildTrendReport(data.prs) : null), [data])
+  const clusters = useMemo(
+    () =>
+      data
+        ? filterClustersForExcluded(
+            data.analysis?.clusters ?? buildPrClusters(effectivePrs),
+            excludedUserSet,
+            data.prs,
+          )
+        : [],
+    [data, effectivePrs, excludedUserSet],
+  )
+  const trends = useMemo(() => (effectiveData ? buildTrendReport(effectiveData.prs) : null), [effectiveData])
   const floodPrNumbers = useMemo(
     () => new Set(floodWaves.flatMap((wave) => wave.prs)),
     [floodWaves],
   )
   const latestRecommendation = data?.ai?.recommendations[0]
+  const selectedPr = useMemo(() => {
+    if (selectedPrState?.repoSlug !== selectedSlug) return null
+    return effectivePrs.find((pr) => pr.number === selectedPrState.pr.number) ?? selectedPrState.pr
+  }, [effectivePrs, selectedPrState, selectedSlug])
+  const selectPr = (pr: PullRequest) => setSelectedPrState({ repoSlug: selectedSlug, pr })
+
+  function updateExcludedUsers(users: string[]) {
+    const normalized = [...new Set(users.map(normalizeLogin).filter(Boolean))].sort()
+    setExcludedUsersBySlug((current) => ({
+      ...current,
+      [selectedSlug ?? 'default']: normalized,
+    }))
+    localStorage.setItem(excludedStorageKey(selectedSlug), JSON.stringify(normalized))
+  }
 
   async function runReviewPlan() {
     setRunningReviewPlan(true)
@@ -161,7 +381,7 @@ export default function App() {
                 active={page}
                 onChange={setPage}
                 counts={{
-                  prs: data.prs.length,
+                  prs: effectiveData?.prs.length ?? data.prs.length,
                   flood: floodClusters.length,
                   clusters: clusters.length,
                 }}
@@ -170,12 +390,12 @@ export default function App() {
               <section className="min-w-0">
                 {page === 'overview' && (
                   <div className="space-y-5">
-                    <ScanHeader data={data} />
-                    <Metrics data={data} floodWaves={floodWaves} />
+                    <ScanHeader data={effectiveData ?? data} />
+                    <Metrics data={effectiveData ?? data} floodWaves={floodWaves} />
                     <CommandStrip data={data} />
                     <AiReviewPlan
                       batch={latestRecommendation}
-                      prs={data.prs}
+                      prs={effectiveData?.prs ?? data.prs}
                       onSelect={selectPr}
                       onRun={runReviewPlan}
                       running={runningReviewPlan}
@@ -192,17 +412,17 @@ export default function App() {
                           </p>
                         </div>
                         <div className="text-xs text-zinc-600">
-                          {Object.keys(data.signalSummary.flagCounts).length} flag types
+                          {Object.keys((effectiveData ?? data).signalSummary.flagCounts).length} flag types
                         </div>
                       </div>
                       <div className="grid gap-4 xl:grid-cols-[minmax(360px,0.95fr)_minmax(0,1.05fr)]">
-                        <FileBucketsChart summary={data.signalSummary} embedded />
-                        <FlagsList summary={data.signalSummary} embedded />
+                        <FileBucketsChart summary={(effectiveData ?? data).signalSummary} embedded />
+                        <FlagsList summary={(effectiveData ?? data).signalSummary} embedded />
                       </div>
                     </section>
                     <div className="grid gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
                       <FocusQueue
-                        prs={data.prs}
+                        prs={effectiveData?.prs ?? data.prs}
                         onSelect={selectPr}
                         limit={4}
                         actionLabel="Open queue"
@@ -210,7 +430,7 @@ export default function App() {
                       />
                       <FloodWaves
                         waves={floodWaves}
-                        prs={data.prs}
+                        prs={effectiveData?.prs ?? data.prs}
                         clusters={floodClusters}
                         onSelect={selectPr}
                         limit={3}
@@ -228,7 +448,7 @@ export default function App() {
                       description="Search, sort, and filter cached pull requests without the overview noise."
                     />
                     <PrList
-                      prs={data.prs}
+                      prs={effectiveData?.prs ?? data.prs}
                       selected={selectedPr}
                       onSelect={selectPr}
                       floodPrNumbers={floodPrNumbers}
@@ -246,7 +466,7 @@ export default function App() {
                     />
                     <FloodWaves
                       waves={floodWaves}
-                      prs={data.prs}
+                      prs={effectiveData?.prs ?? data.prs}
                       clusters={floodClusters}
                       onSelect={selectPr}
                       limit={30}
@@ -257,11 +477,19 @@ export default function App() {
 
                 {page === 'stats' && trends && (
                   <StatsPage
-                    data={data}
+                    data={effectiveData ?? data}
                     clusters={clusters}
                     trends={trends}
                     floodWaves={floodWaves}
                     onSelect={selectPr}
+                  />
+                )}
+
+                {page === 'settings' && (
+                  <SettingsPage
+                    repo={data.repo}
+                    excludedUsers={excludedUsers}
+                    onChange={updateExcludedUsers}
                   />
                 )}
               </section>
@@ -273,7 +501,7 @@ export default function App() {
       <PrDetail
         key={selectedPr?.number ?? 'empty'}
         pr={selectedPr}
-        prs={data?.prs}
+        prs={effectiveData?.prs ?? data?.prs}
         clusters={clusters}
         ai={data?.ai}
         onRunAi={runAiAction}

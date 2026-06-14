@@ -268,6 +268,70 @@ class PhaseOneTests(unittest.TestCase):
             with self.assertRaises(triage.TriageError):
                 triage.run_gh_json(["gh", "api", "repos/o/r/pulls"])
 
+    def test_changelets_capture_readme_only(self):
+        pr = {
+            "title": "Update README",
+            "body": "",
+            "additions": 2,
+            "deletions": 0,
+            "changedFiles": 1,
+            "files": [{"filename": "README.md", "patch": "@@\n+Install instructions"}],
+            "contributor": {},
+        }
+        pr["signals"] = triage.compute_pr_signals(pr)
+
+        self.assertIn("edit README only", triage.extract_changelets(pr))
+
+    def test_changelets_capture_model_provider_fix(self):
+        pr = {
+            "title": "fix(mistral): forward supported sampling params",
+            "body": "Adds tests for Mistral request params.",
+            "additions": 40,
+            "deletions": 2,
+            "changedFiles": 2,
+            "files": [
+                {
+                    "filename": "libs/agno/models/mistral.py",
+                    "patch": "@@\n+frequency_penalty = self.frequency_penalty\n+stop = self.stop",
+                },
+                {
+                    "filename": "tests/unit/models/test_mistral_request_params.py",
+                    "patch": "@@\n+assert request_params['stop'] == stop",
+                },
+            ],
+            "contributor": {},
+        }
+        pr["signals"] = triage.compute_pr_signals(pr)
+
+        changelets = triage.extract_changelets(pr)
+
+        self.assertIn("fix bug", changelets)
+        self.assertIn("add or update tests", changelets)
+        self.assertIn("update model/provider behavior", changelets)
+
+    def test_changelets_capture_guard_and_persistence(self):
+        pr = {
+            "title": "fix: scope entity memory ids by user",
+            "body": "Prevents cross-user persistence collisions.",
+            "additions": 60,
+            "deletions": 4,
+            "changedFiles": 1,
+            "files": [
+                {
+                    "filename": "libs/agno/agno/learn/stores/entity_memory.py",
+                    "patch": "@@\n+if namespace == 'user' and not user_id:\n+    return None\n+db.upsert_learning(id=scoped_id)",
+                }
+            ],
+            "contributor": {},
+        }
+        pr["signals"] = triage.compute_pr_signals(pr)
+
+        changelets = triage.extract_changelets(pr)
+
+        self.assertIn("fix bug", changelets)
+        self.assertIn("add guard or validation", changelets)
+        self.assertIn("change database or persistence behavior", changelets)
+
     def test_contributor_trust_penalizes_risky_low_context_change(self):
         pr = {
             "title": "Update README",

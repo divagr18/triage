@@ -23,6 +23,7 @@ from typing import Any
 
 
 CACHE_ROOT = Path(".triage") / "cache"
+SCHEMA_VERSION = 4
 STOP_WORDS = {
     "a",
     "add",
@@ -125,6 +126,8 @@ def main(argv: list[str] | None = None) -> int:
             scan_command(args)
         elif args.command == "report":
             report_command(args)
+        elif args.command == "changelets":
+            changelets_command(args)
         elif args.command == "cache-path":
             print(cache_path_for_repo(args.repo))
         else:
@@ -165,6 +168,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     report = subcommands.add_parser("report", help="show deterministic signal summary from cache")
     report.add_argument("repo", help="repository in owner/repo form")
+
+    changelets = subcommands.add_parser("changelets", help="show semantic changelets from cache")
+    changelets.add_argument("repo", help="repository in owner/repo form")
+    changelets.add_argument("--limit", type=positive_int, default=20)
 
     cache_path = subcommands.add_parser("cache-path", help="print cache file path for a repo")
     cache_path.add_argument("repo", help="repository in owner/repo form")
@@ -219,6 +226,13 @@ def report_command(args: argparse.Namespace) -> None:
     print_signal_report(data)
 
 
+def changelets_command(args: argparse.Namespace) -> None:
+    validate_repo(args.repo)
+    data = read_cache(cache_path_for_repo(args.repo))
+    attach_deterministic_signals(data)
+    print_changelets(data, limit=args.limit)
+
+
 def scan_github(args: ScanArgs) -> dict[str, Any]:
     if args.api == "graphql":
         return scan_github_graphql(args)
@@ -257,7 +271,7 @@ def scan_github_graphql(args: ScanArgs) -> dict[str, Any]:
         normalized_prs.append(normalized)
 
     data = {
-        "schemaVersion": 2,
+        "schemaVersion": SCHEMA_VERSION,
         "tool": "triage",
         "repo": args.repo,
         "state": args.state,
@@ -299,7 +313,7 @@ def scan_github_rest(args: ScanArgs) -> dict[str, Any]:
         normalized_prs.append(normalized)
 
     data = {
-        "schemaVersion": 3,
+        "schemaVersion": SCHEMA_VERSION,
         "tool": "triage",
         "repo": args.repo,
         "state": args.state,
@@ -627,6 +641,7 @@ def attach_deterministic_signals(data: dict[str, Any]) -> None:
         if isinstance(pr, dict):
             pr["signals"] = compute_pr_signals(pr)
             pr["flags"] = compute_pr_flags(pr)
+            pr["changelets"] = extract_changelets(pr)
             trust = compute_contributor_trust(pr)
             pr["contributorTrust"] = trust
             if isinstance(pr.get("contributor"), dict):
@@ -734,9 +749,115 @@ def compute_pr_flags(pr: dict[str, Any]) -> list[str]:
     return flags
 
 
+def extract_changelets(pr: dict[str, Any], limit: int = 8) -> list[str]:
+    signals = pr.get("signals") or {}
+    files = [file for file in pr.get("files", []) if isinstance(file, dict)]
+    title = pr.get("title") or ""
+    changelets: list[str] = []
+
+    if signals.get("readmeOnly"):
+        changelets.append("edit README only")
+    elif signals.get("docsOnly"):
+        changelets.append("update documentation")
+    if signals.get("hasTests"):
+        changelets.append("add or update tests")
+    if signals.get("dependencyFilesChanged"):
+        changelets.append("modify dependency metadata")
+    if signals.get("configOnly") or any(classify_file_bucket(name) == "config" for name in signals.get("fileNames", [])):
+        changelets.append("modify project configuration")
+    if signals.get("coreFilesChanged"):
+        changelets.append("touch core runtime")
+    if signals.get("generatedFilesChanged"):
+        changelets.append("modify generated files")
+    if signals.get("commentOnly"):
+        changelets.append("edit comments only")
+
+    title_changelet = infer_title_changelet(title)
+    if title_changelet:
+        changelets.append(title_changelet)
+
+    file_text = "\n".join(file.get("filename") or "" for file in files).lower()
+    patch_text = "\n".join(file.get("patch") or "" for file in files).lower()
+    subject_text = f"{title}\n{file_text}\n{patch_text}".lower()
+    added_lines: list[str] = []
+    removed_lines: list[str] = []
+    for file in files:
+        parsed = parse_patch_changed_lines(file.get("patch") or "")
+        added_lines.extend(parsed["added"])
+        removed_lines.extend(parsed["removed"])
+
+    added_text = "\n".join(added_lines).lower()
+    if re.search(r"\bif\b.{0,80}\b(not|none|null|missing|required|invalid)\b", added_text) or re.search(
+        r"\b(raise|return)\b.{0,80}\b(error|none|null|false)\b", added_text
+    ):
+        changelets.append("add guard or validation")
+    if re.search(r"\btry\b|\bexcept\b|\bcatch\b|retry|timeout|fallback", patch_text):
+        changelets.append("improve error handling")
+    if re.search(r"\basync\b|\bawait\b|stream|yield|generator", patch_text):
+        changelets.append("change async or streaming flow")
+    if re.search(r"\b(openai|anthropic|mistral|cerebras|sampling|temperature|token|models?/)\b", subject_text):
+        changelets.append("update model/provider behavior")
+    if re.search(r"\b(db|database|schema|migration|postgres|sqlite|session|storage|persistence)\b", subject_text):
+        changelets.append("change database or persistence behavior")
+    if re.search(r"\b(toolkit|tools?/|mcp|browser|playwright|slack)\b", subject_text):
+        changelets.append("add or modify tool integration")
+    if any(is_example_or_cookbook_file(file.get("filename") or "") for file in files):
+        changelets.append("update examples or cookbook")
+
+    for module in signals.get("touchedModules") or []:
+        if module and len(changelets) < limit:
+            changelets.append(f"touch {module}")
+
+    deduped = unique_strings(changelets)
+    if not deduped:
+        deduped.append("modify project files")
+    return deduped[:limit]
+
+
+def infer_title_changelet(title: str) -> str:
+    raw = title.strip().lower()
+    match = re.match(r"^\[?([a-z]+)(?:\([^)]+\))?[\]:)]", raw)
+    first_word = match.group(1) if match else ""
+    normalized = re.sub(r"^\[?[a-z]+(?:\([^)]+\))?[\]:)]\s*", "", raw)
+    if not normalized:
+        return ""
+    first_word = first_word or normalized.split()[0]
+    if first_word in {"fix", "fixes", "bugfix"}:
+        return "fix bug"
+    if first_word in {"feat", "feature", "add", "adds"}:
+        return "add feature"
+    if first_word in {"docs", "doc", "document"}:
+        return "update documentation"
+    if first_word in {"refactor", "rework"}:
+        return "refactor implementation"
+    if first_word in {"test", "tests"}:
+        return "update tests"
+    if first_word in {"chore", "cleanup"}:
+        return "perform maintenance cleanup"
+    return ""
+
+
+def is_example_or_cookbook_file(filename: str) -> bool:
+    normalized = normalize_path(filename)
+    return normalized.startswith("examples/") or "cookbook/" in normalized or normalized.startswith("cookbook/")
+
+
+def unique_strings(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = re.sub(r"\s+", " ", value.strip())
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
+
+
 def compute_signal_summary(prs: list[Any]) -> dict[str, Any]:
     flag_counts: dict[str, int] = {}
     bucket_counts: dict[str, int] = {}
+    changelet_counts: dict[str, int] = {}
     risky_new_contributors = 0
     low_value = 0
     trust_scores: list[int] = []
@@ -751,6 +872,8 @@ def compute_signal_summary(prs: list[Any]) -> dict[str, Any]:
         buckets = ((pr.get("signals") or {}).get("fileBuckets") or {})
         for bucket, count in buckets.items():
             bucket_counts[bucket] = bucket_counts.get(bucket, 0) + int_or_zero(count)
+        for changelet in pr.get("changelets") or []:
+            changelet_counts[changelet] = changelet_counts.get(changelet, 0) + 1
         if "new_contributor_high_risk" in flags:
             risky_new_contributors += 1
         if any(flag in flags for flag in LOW_VALUE_FLAGS):
@@ -764,6 +887,7 @@ def compute_signal_summary(prs: list[Any]) -> dict[str, Any]:
     return {
         "flagCounts": dict(sorted(flag_counts.items())),
         "fileBucketCounts": dict(sorted(bucket_counts.items())),
+        "changeletCounts": dict(sorted(changelet_counts.items(), key=lambda item: (-item[1], item[0]))),
         "lowValuePrs": low_value,
         "riskyNewContributorPrs": risky_new_contributors,
         "lowTrustPrs": low_trust,
@@ -1129,6 +1253,13 @@ def print_signal_report(data: dict[str, Any]) -> None:
             print(f"- {bucket}: {count}")
         print()
 
+    changelet_counts = summary.get("changeletCounts") or {}
+    if changelet_counts:
+        print("Top changelets:")
+        for changelet, count in list(changelet_counts.items())[:10]:
+            print(f"- {changelet}: {count}")
+        print()
+
     flagged = [pr for pr in prs if pr.get("flags")]
     if flagged:
         print("Flagged PRs:")
@@ -1149,6 +1280,20 @@ def print_signal_report(data: dict[str, Any]) -> None:
                 f"- #{pr.get('number')} {trust.get('score', 'n/a')}/100 "
                 f"({trust.get('bucket', 'unknown')}): {trust.get('explanation', '')}"
             )
+
+
+def print_changelets(data: dict[str, Any], *, limit: int) -> None:
+    prs = [pr for pr in data.get("prs", []) if isinstance(pr, dict)]
+    print("Semantic Changelets")
+    print("-------------------")
+    print(f"Repo: {data.get('repo', 'unknown')}")
+    print(f"PRs: {len(prs)}")
+    print()
+    for pr in prs[:limit]:
+        print(f"#{pr.get('number')} {pr.get('title')}")
+        for changelet in pr.get("changelets") or []:
+            print(f"- {changelet}")
+        print()
 
 
 def validate_repo(repo: str) -> None:

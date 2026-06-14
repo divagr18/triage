@@ -17,6 +17,7 @@ python triage.py scan agno-agi/agno --state open --limit 200 --refresh
 python triage.py scan agno-agi/agno --api graphql --limit 20 --refresh
 python triage.py scan microsoft/coreutils --offline
 python triage.py report microsoft/coreutils
+python triage.py changelets agno-agi/agno --limit 10
 python triage.py cache-path microsoft/coreutils
 ```
 
@@ -48,6 +49,8 @@ can hit tighter search limits on large repos.
 - CI and review state
 - contributor history signals
 - contributor trust score with positive/risk reasons
+- deterministic semantic changelets such as `fix bug`, `add or update tests`,
+  `touch core runtime`, and `update model/provider behavior`
 - flags such as `readme_only_noise`, `dependency_without_usage`,
   `core_change_without_tests`, `ci_failing`, and `possible_ai_flood_member`
 

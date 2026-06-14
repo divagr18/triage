@@ -97,9 +97,9 @@ function CommandStrip({ data }: { data: TriageCache }) {
 
 function PageHeader({ title, description }: { title: string; description: string }) {
   return (
-    <div className="mb-4">
-      <h2 className="text-xl font-semibold tracking-tight text-zinc-50">{title}</h2>
-      <p className="mt-1 text-sm text-zinc-500">{description}</p>
+    <div className="mb-5">
+      <h2 className="text-2xl font-semibold tracking-tight text-zinc-50">{title}</h2>
+      <p className="mt-2 text-sm text-zinc-400">{description}</p>
     </div>
   )
 }
@@ -159,7 +159,7 @@ export default function App() {
                 )}
 
                 {page === 'queue' && (
-                  <>
+                  <div className="max-w-5xl">
                     <PageHeader
                       title="Review Queue"
                       description="Search, sort, and filter cached pull requests without the overview noise."
@@ -171,7 +171,7 @@ export default function App() {
                       floodPrNumbers={floodPrNumbers}
                       pageMode
                     />
-                  </>
+                  </div>
                 )}
 
                 {page === 'flood' && (

@@ -1,11 +1,11 @@
 @import 'tailwindcss';
 
 @theme {
-  --color-bg: #000000;
-  --color-surface: #09090b;
-  --color-surface-elevated: #0f0f11;
-  --color-border: #202024;
-  --color-border-subtle: #18181b;
+  --color-bg: #030303;
+  --color-surface: #0b0b0d;
+  --color-surface-elevated: #121216;
+  --color-border: #2a2a30;
+  --color-border-subtle: #202024;
   --color-text: #fafafa;
   --color-text-secondary: #a1a1aa;
   --color-text-muted: #71717a;
@@ -65,13 +65,13 @@ body {
 }
 
 .surface {
-  border: 1px solid rgba(39, 39, 42, 0.72);
-  background: rgba(9, 9, 11, 0.72);
+  border: 1px solid rgba(63, 63, 70, 0.7);
+  background: rgba(9, 9, 11, 0.9);
 }
 
 .surface-soft {
-  border: 1px solid rgba(39, 39, 42, 0.58);
-  background: rgba(9, 9, 11, 0.48);
+  border: 1px solid rgba(63, 63, 70, 0.52);
+  background: rgba(9, 9, 11, 0.68);
 }
 
 .animate-fade-in {

@@ -160,6 +160,65 @@ class PhaseOneTests(unittest.TestCase):
         self.assertIn("signals", data["prs"][0])
         self.assertIn("readme_only_noise", data["prs"][0]["flags"])
         self.assertEqual(data["signalSummary"]["lowValuePrs"], 1)
+        self.assertIn("trustScore", data["prs"][0]["contributor"])
+
+    def test_contributor_trust_rewards_known_passing_contributor(self):
+        pr = {
+            "title": "Fix parser edge case",
+            "body": "Handles malformed input while preserving the old behavior.",
+            "additions": 20,
+            "deletions": 4,
+            "changedFiles": 2,
+            "checks": [{"name": "ci", "conclusion": "SUCCESS"}],
+            "reviews": [{"state": "APPROVED"}],
+            "reviewDecision": "APPROVED",
+            "files": [
+                {"filename": "src/parser.js", "patch": "@@\n-return old\n+return fixed"},
+                {"filename": "tests/parser.test.js", "patch": "@@\n+assert.equal(result, expected)"},
+            ],
+            "contributor": {
+                "accountAssociation": "CONTRIBUTOR",
+                "priorMergedPrs": 6,
+                "priorClosedUnmergedPrs": 0,
+                "currentOpenPrs": 1,
+                "currentOpenPrsInScan": 1,
+            },
+        }
+        pr["signals"] = triage.compute_pr_signals(pr)
+        pr["flags"] = triage.compute_pr_flags(pr)
+
+        trust = triage.compute_contributor_trust(pr)
+
+        self.assertGreaterEqual(trust["score"], 75)
+        self.assertEqual(trust["bucket"], "high")
+        self.assertTrue(trust["positives"])
+
+    def test_contributor_trust_penalizes_risky_low_context_change(self):
+        pr = {
+            "title": "Update README",
+            "body": "",
+            "additions": 4,
+            "deletions": 0,
+            "changedFiles": 1,
+            "checks": [{"name": "ci", "conclusion": "FAILURE"}],
+            "reviews": [],
+            "files": [{"filename": "README.md", "patch": "@@\n+tiny cleanup"}],
+            "contributor": {
+                "accountAssociation": "FIRST_TIMER",
+                "priorMergedPrs": 0,
+                "priorClosedUnmergedPrs": 3,
+                "currentOpenPrs": 5,
+                "currentOpenPrsInScan": 5,
+            },
+        }
+        pr["signals"] = triage.compute_pr_signals(pr)
+        pr["flags"] = triage.compute_pr_flags(pr)
+
+        trust = triage.compute_contributor_trust(pr)
+
+        self.assertLess(trust["score"], 40)
+        self.assertEqual(trust["bucket"], "very_low")
+        self.assertTrue(trust["risks"])
 
 
 if __name__ == "__main__":

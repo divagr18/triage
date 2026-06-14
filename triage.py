@@ -431,6 +431,11 @@ def attach_deterministic_signals(data: dict[str, Any]) -> None:
         if isinstance(pr, dict):
             pr["signals"] = compute_pr_signals(pr)
             pr["flags"] = compute_pr_flags(pr)
+            trust = compute_contributor_trust(pr)
+            pr["contributorTrust"] = trust
+            if isinstance(pr.get("contributor"), dict):
+                pr["contributor"]["trustScore"] = trust["score"]
+                pr["contributor"]["trustBucket"] = trust["bucket"]
     data["signalSummary"] = compute_signal_summary(prs)
 
 
@@ -538,6 +543,8 @@ def compute_signal_summary(prs: list[Any]) -> dict[str, Any]:
     bucket_counts: dict[str, int] = {}
     risky_new_contributors = 0
     low_value = 0
+    trust_scores: list[int] = []
+    low_trust = 0
 
     for pr in prs:
         if not isinstance(pr, dict):
@@ -552,12 +559,19 @@ def compute_signal_summary(prs: list[Any]) -> dict[str, Any]:
             risky_new_contributors += 1
         if any(flag in flags for flag in LOW_VALUE_FLAGS):
             low_value += 1
+        trust = pr.get("contributorTrust") or {}
+        if isinstance(trust.get("score"), int):
+            trust_scores.append(trust["score"])
+            if trust["score"] < 40:
+                low_trust += 1
 
     return {
         "flagCounts": dict(sorted(flag_counts.items())),
         "fileBucketCounts": dict(sorted(bucket_counts.items())),
         "lowValuePrs": low_value,
         "riskyNewContributorPrs": risky_new_contributors,
+        "lowTrustPrs": low_trust,
+        "averageContributorTrust": round(sum(trust_scores) / len(trust_scores), 1) if trust_scores else None,
     }
 
 
@@ -717,6 +731,123 @@ def is_new_contributor(contributor: dict[str, Any]) -> bool:
     return int_or_zero(contributor.get("priorMergedPrs")) == 0
 
 
+def compute_contributor_trust(pr: dict[str, Any]) -> dict[str, Any]:
+    contributor = pr.get("contributor") if isinstance(pr.get("contributor"), dict) else {}
+    signals = pr.get("signals") or {}
+    flags = pr.get("flags") or []
+    score = 50
+    positives: list[str] = []
+    risks: list[str] = []
+
+    association = str(contributor.get("accountAssociation") or "").upper()
+    prior_merged = int_or_zero(contributor.get("priorMergedPrs"))
+    prior_closed_unmerged = int_or_zero(contributor.get("priorClosedUnmergedPrs"))
+    current_open = int_or_zero(contributor.get("currentOpenPrs"))
+    open_in_scan = int_or_zero(contributor.get("currentOpenPrsInScan"))
+
+    if association in {"OWNER", "MEMBER", "COLLABORATOR"}:
+        score += 25
+        positives.append(f"{association.lower()} of the repository")
+    elif association in {"CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR"}:
+        score += 8
+        positives.append(f"GitHub association: {association.lower()}")
+    elif association == "FIRST_TIMER":
+        score -= 8
+        risks.append("first-time GitHub contributor to this repo")
+
+    if prior_merged >= 10:
+        score += 20
+        positives.append(f"{prior_merged} prior merged PRs")
+    elif prior_merged >= 3:
+        score += 14
+        positives.append(f"{prior_merged} prior merged PRs")
+    elif prior_merged >= 1:
+        score += 8
+        positives.append(f"{prior_merged} prior merged PR")
+    else:
+        score -= 10
+        risks.append("no prior merged PRs found in repo")
+
+    if prior_closed_unmerged >= 5:
+        score -= 12
+        risks.append(f"{prior_closed_unmerged} prior closed-unmerged PRs")
+    elif prior_closed_unmerged >= 2:
+        score -= 6
+        risks.append(f"{prior_closed_unmerged} prior closed-unmerged PRs")
+
+    if signals.get("ciState") == "passing":
+        score += 8
+        positives.append("current CI passing")
+    elif signals.get("ciState") == "failing":
+        score -= 14
+        risks.append("current CI failing")
+
+    if signals.get("reviewState") in {"approved", "reviewed"}:
+        score += 8
+        positives.append(f"current review state: {signals['reviewState']}")
+    elif signals.get("reviewState") == "changes_requested":
+        score -= 8
+        risks.append("changes requested on current PR")
+
+    low_value_flags = sorted(flag for flag in flags if flag in LOW_VALUE_FLAGS)
+    if low_value_flags:
+        score -= min(18, 6 * len(low_value_flags))
+        risks.append(f"low-value flags: {', '.join(low_value_flags)}")
+
+    if "new_contributor_high_risk" in flags:
+        score -= 12
+        risks.append("new contributor changing core or large surface area")
+    if "possible_ai_flood_member" in flags:
+        score -= 8
+        risks.append("matches small low-context PR flood pattern")
+    if "core_change_without_tests" in flags:
+        score -= 8
+        risks.append("core change without tests")
+
+    if current_open >= 8:
+        score -= 12
+        risks.append(f"{current_open} currently open PRs in repo")
+    elif current_open >= 4:
+        score -= 6
+        risks.append(f"{current_open} currently open PRs in repo")
+    if open_in_scan >= 4:
+        score -= 6
+        risks.append(f"{open_in_scan} PRs by this contributor in current scan")
+
+    score = clamp_score(score)
+    return {
+        "score": score,
+        "bucket": trust_bucket(score),
+        "positives": positives[:5],
+        "risks": risks[:5],
+        "explanation": build_trust_explanation(score, positives, risks),
+    }
+
+
+def trust_bucket(score: int) -> str:
+    if score >= 75:
+        return "high"
+    if score >= 55:
+        return "medium"
+    if score >= 40:
+        return "low"
+    return "very_low"
+
+
+def build_trust_explanation(score: int, positives: list[str], risks: list[str]) -> str:
+    if positives and risks:
+        return f"{score}/100: {positives[0]}; watch {risks[0]}."
+    if positives:
+        return f"{score}/100: {positives[0]}."
+    if risks:
+        return f"{score}/100: {risks[0]}."
+    return f"{score}/100: limited contributor signal available."
+
+
+def clamp_score(score: int) -> int:
+    return max(0, min(100, score))
+
+
 def run_gh_json(command: list[str]) -> Any:
     result = subprocess.run(command, text=True, capture_output=True)
     if result.returncode != 0:
@@ -755,6 +886,8 @@ def print_scan_summary(data: dict[str, Any], *, offline: bool) -> None:
     if summary:
         print(f"Low-value PRs flagged: {summary.get('lowValuePrs', 0)}")
         print(f"Risky new-contributor PRs: {summary.get('riskyNewContributorPrs', 0)}")
+        if summary.get("averageContributorTrust") is not None:
+            print(f"Average contributor trust: {summary['averageContributorTrust']}/100")
     if data.get("since"):
         print(f"Since: {data['since']}")
     if data.get("scannedAt"):
@@ -770,6 +903,9 @@ def print_signal_report(data: dict[str, Any]) -> None:
     print(f"PRs: {len(prs)}")
     print(f"Low-value PRs flagged: {summary.get('lowValuePrs', 0)}")
     print(f"Risky new-contributor PRs: {summary.get('riskyNewContributorPrs', 0)}")
+    if summary.get("averageContributorTrust") is not None:
+        print(f"Average contributor trust: {summary['averageContributorTrust']}/100")
+    print(f"Low-trust PRs: {summary.get('lowTrustPrs', 0)}")
     print()
 
     flag_counts = summary.get("flagCounts") or {}
@@ -792,6 +928,20 @@ def print_signal_report(data: dict[str, Any]) -> None:
         for pr in flagged[:20]:
             flags = ", ".join(pr.get("flags") or [])
             print(f"- #{pr.get('number')} {pr.get('title')}: {flags}")
+        print()
+
+    trust_sorted = sorted(
+        prs,
+        key=lambda pr: ((pr.get("contributorTrust") or {}).get("score", 50), pr.get("number") or 0),
+    )
+    if trust_sorted:
+        print("Contributor trust:")
+        for pr in trust_sorted[:10]:
+            trust = pr.get("contributorTrust") or {}
+            print(
+                f"- #{pr.get('number')} {trust.get('score', 'n/a')}/100 "
+                f"({trust.get('bucket', 'unknown')}): {trust.get('explanation', '')}"
+            )
 
 
 def validate_repo(repo: str) -> None:

@@ -4,6 +4,9 @@ import { formatFlag, trustColor } from '../utils'
 interface Props {
   prs: PullRequest[]
   onSelect: (pr: PullRequest) => void
+  limit?: number
+  actionLabel?: string
+  onAction?: () => void
 }
 
 function riskWeight(pr: PullRequest) {
@@ -14,7 +17,7 @@ function riskWeight(pr: PullRequest) {
   return flagWeight + trustWeight + reviewWeight + codeWeight
 }
 
-export function FocusQueue({ prs, onSelect }: Props) {
+export function FocusQueue({ prs, onSelect, limit = 6, actionLabel, onAction }: Props) {
   const queue = [...prs]
     .filter(
       (pr) =>
@@ -23,7 +26,7 @@ export function FocusQueue({ prs, onSelect }: Props) {
         pr.signals.reviewState === 'none',
     )
     .sort((a, b) => riskWeight(b) - riskWeight(a))
-    .slice(0, 6)
+    .slice(0, limit)
 
   return (
     <section className="surface-soft rounded-lg p-4">
@@ -32,7 +35,16 @@ export function FocusQueue({ prs, onSelect }: Props) {
           <h3 className="text-sm font-semibold text-white">Focus queue</h3>
           <p className="mt-1 text-xs text-zinc-500">Highest-risk cached PRs</p>
         </div>
-        <div className="text-xs text-zinc-500">{queue.length}</div>
+        {onAction ? (
+          <button
+            onClick={onAction}
+            className="rounded-md border border-sky-500/25 bg-sky-500/10 px-2.5 py-1 text-xs font-medium text-sky-200 transition hover:border-sky-400/45 hover:bg-sky-500/15"
+          >
+            {actionLabel ?? 'Open'}
+          </button>
+        ) : (
+          <div className="text-xs text-zinc-500">{queue.length}</div>
+        )}
       </div>
 
       {queue.length === 0 ? (

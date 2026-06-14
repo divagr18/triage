@@ -163,6 +163,29 @@ export interface FloodWave {
   recommendedAction: string
 }
 
+export interface PrCluster {
+  id: string
+  label: string
+  prs: number[]
+  size: number
+  bestPr: number
+  bestTitle: string
+  reasons: string[]
+}
+
+export interface TrendItem {
+  label: string
+  count: number
+}
+
+export interface TrendReport {
+  dailyPrs: TrendItem[]
+  topChangelets: TrendItem[]
+  topFiles: TrendItem[]
+  trustBuckets: TrendItem[]
+  reviewStates: TrendItem[]
+}
+
 export interface RepoMeta {
   slug: string
   repo: string

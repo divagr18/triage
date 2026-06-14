@@ -9,9 +9,10 @@ import { FloodWaves } from './components/FloodWaves'
 import { PrList } from './components/PrList'
 import { PrDetail } from './components/PrDetail'
 import { Sidebar, type PageKey } from './components/Sidebar'
+import { StatsPage } from './components/StatsPage'
 import { useRepos, useRepoData } from './useTriageData'
 import type { PullRequest, TriageCache } from './types'
-import { buildAiFloodWaves } from './utils'
+import { buildAiFloodWaves, buildPrClusters, buildTrendReport } from './utils'
 
 function EmptyState() {
   return (
@@ -114,6 +115,8 @@ export default function App() {
   const selectedPr = selectedPrState?.repoSlug === selectedSlug ? selectedPrState.pr : null
   const selectPr = (pr: PullRequest) => setSelectedPrState({ repoSlug: selectedSlug, pr })
   const floodWaves = useMemo(() => (data ? buildAiFloodWaves(data.prs) : []), [data])
+  const clusters = useMemo(() => (data ? buildPrClusters(data.prs) : []), [data])
+  const trends = useMemo(() => (data ? buildTrendReport(data.prs) : null), [data])
   const floodPrNumbers = useMemo(
     () => new Set(floodWaves.flatMap((wave) => wave.prs)),
     [floodWaves],
@@ -137,6 +140,7 @@ export default function App() {
                 counts={{
                   prs: data.prs.length,
                   flood: floodWaves.length,
+                  clusters: clusters.length,
                 }}
               />
 
@@ -146,10 +150,6 @@ export default function App() {
                     <ScanHeader data={data} />
                     <Metrics data={data} floodWaves={floodWaves} />
                     <CommandStrip data={data} />
-                    <div className="grid gap-5 xl:grid-cols-2">
-                      <FocusQueue prs={data.prs} onSelect={selectPr} />
-                      <FloodWaves waves={floodWaves} prs={data.prs} onSelect={selectPr} limit={3} />
-                    </div>
                     <section>
                       <div className="mb-4">
                         <h2 className="text-lg font-semibold tracking-tight text-zinc-50">Signals</h2>
@@ -162,6 +162,24 @@ export default function App() {
                         <FlagsList summary={data.signalSummary} />
                       </div>
                     </section>
+                    <div className="grid gap-5 xl:grid-cols-2">
+                      <FocusQueue
+                        prs={data.prs}
+                        onSelect={selectPr}
+                        limit={4}
+                        actionLabel="Open queue"
+                        onAction={() => setPage('queue')}
+                      />
+                      <FloodWaves
+                        waves={floodWaves}
+                        prs={data.prs}
+                        clusters={clusters}
+                        onSelect={selectPr}
+                        limit={3}
+                        actionLabel="Open flood"
+                        onAction={() => setPage('flood')}
+                      />
+                    </div>
                   </div>
                 )}
 
@@ -190,6 +208,7 @@ export default function App() {
                     <FloodWaves
                       waves={floodWaves}
                       prs={data.prs}
+                      clusters={clusters}
                       onSelect={selectPr}
                       limit={30}
                       pageMode
@@ -197,6 +216,15 @@ export default function App() {
                   </>
                 )}
 
+                {page === 'stats' && trends && (
+                  <StatsPage
+                    data={data}
+                    clusters={clusters}
+                    trends={trends}
+                    floodWaves={floodWaves}
+                    onSelect={selectPr}
+                  />
+                )}
               </section>
             </div>
           </div>

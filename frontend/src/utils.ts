@@ -1,5 +1,5 @@
 import { formatDistanceToNowStrict, parseISO } from 'date-fns'
-import type { FloodWave, PullRequest } from './types'
+import type { FloodWave, PrCluster, PullRequest, TrendItem, TrendReport } from './types'
 
 export function formatNumber(n: number): string {
   return new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 }).format(n)
@@ -20,15 +20,15 @@ export function formatFlag(flag: string): string {
 export function trustColor(bucket: string): string {
   switch (bucket) {
     case 'high':
-      return 'text-emerald-300 bg-emerald-400/[0.06] border-zinc-800'
+      return 'text-emerald-200 bg-emerald-400/[0.1] border-emerald-400/25'
     case 'medium':
-      return 'text-amber-300 bg-amber-400/[0.06] border-zinc-800'
+      return 'text-amber-200 bg-amber-400/[0.1] border-amber-400/25'
     case 'low':
-      return 'text-orange-300 bg-orange-400/[0.06] border-zinc-800'
+      return 'text-orange-200 bg-orange-400/[0.1] border-orange-400/25'
     case 'very_low':
-      return 'text-red-300 bg-red-400/[0.06] border-zinc-800'
+      return 'text-red-200 bg-red-400/[0.1] border-red-400/25'
     default:
-      return 'text-zinc-400 bg-zinc-400/[0.06] border-zinc-800'
+      return 'text-zinc-300 bg-zinc-400/[0.08] border-zinc-700'
   }
 }
 
@@ -60,15 +60,15 @@ export function reviewColor(state: string): string {
 
 export function flagColor(flag: string): string {
   if (flag.includes('risk') || flag.includes('failing') || flag.includes('without_tests')) {
-    return 'text-red-300 border-zinc-800 bg-zinc-900/40'
+    return 'text-red-200 border-red-400/25 bg-red-400/[0.08]'
   }
   if (flag.includes('noise') || flag.includes('generic') || flag.includes('churn') || flag.includes('lockfile')) {
-    return 'text-amber-300 border-zinc-800 bg-zinc-900/40'
+    return 'text-amber-200 border-amber-400/25 bg-amber-400/[0.08]'
   }
   if (flag.includes('no_human_review')) {
-    return 'text-zinc-400 border-zinc-800 bg-zinc-900/35'
+    return 'text-violet-200 border-violet-400/20 bg-violet-400/[0.07]'
   }
-  return 'text-sky-300 border-zinc-800 bg-zinc-900/35'
+  return 'text-sky-200 border-sky-400/20 bg-sky-400/[0.07]'
 }
 
 export function sortPrs(prs: PullRequest[], key: SortKey): PullRequest[] {
@@ -134,6 +134,51 @@ export function buildAiFloodWaves(prs: PullRequest[], options: FloodOptions = {}
   return dedupeFloodWaves(waves)
 }
 
+export function buildPrClusters(prs: PullRequest[], minSize = 2): PrCluster[] {
+  const anchors = new Map<string, PullRequest[]>()
+  for (const pr of prs) {
+    for (const anchor of clusterAnchors(pr)) {
+      const group = anchors.get(anchor) ?? []
+      group.push(pr)
+      anchors.set(anchor, group)
+    }
+  }
+
+  const clusters = [...anchors.entries()]
+    .map(([anchor, group]) => {
+      const unique = dedupePrs(group)
+      if (unique.length < minSize) return null
+      const best = [...unique].sort((a, b) => canonicalScore(b) - canonicalScore(a))[0]
+      return {
+        id: `cluster_${safeId(anchor)}_${unique.map((pr) => pr.number).sort((a, b) => a - b).join('_')}`,
+        label: anchorLabel(anchor),
+        prs: unique.map((pr) => pr.number).sort((a, b) => b - a),
+        size: unique.length,
+        bestPr: best.number,
+        bestTitle: best.title,
+        reasons: clusterReasons(anchor, unique),
+      }
+    })
+    .filter((cluster): cluster is PrCluster => Boolean(cluster))
+    .sort((a, b) => b.size - a.size || a.label.localeCompare(b.label))
+
+  return dedupeClusters(clusters).slice(0, 24)
+}
+
+export function buildTrendReport(prs: PullRequest[]): TrendReport {
+  return {
+    dailyPrs: countBy(
+      prs,
+      (pr) => new Date(pr.createdAt).toISOString().slice(0, 10),
+      { limit: 14, chronological: true },
+    ),
+    topChangelets: countBy(prs.flatMap((pr) => pr.changelets ?? []), (value) => value, { limit: 8 }),
+    topFiles: countBy(prs.flatMap((pr) => pr.signals.fileNames), (value) => value, { limit: 8 }),
+    trustBuckets: countBy(prs, (pr) => pr.contributorTrust.bucket.replace('_', ' '), { limit: 4 }),
+    reviewStates: countBy(prs, (pr) => pr.signals.reviewState.replace(/_/g, ' '), { limit: 5 }),
+  }
+}
+
 function floodAnchors(pr: PullRequest): string[] {
   const anchors = new Set<string>()
   for (const changelet of pr.changelets ?? []) {
@@ -150,6 +195,69 @@ function floodAnchors(pr: PullRequest): string[] {
   const signature = titleSignature(pr.title)
   if (signature) anchors.add(`title:${signature}`)
   return [...anchors]
+}
+
+function clusterAnchors(pr: PullRequest): string[] {
+  const anchors = new Set<string>()
+  for (const changelet of pr.changelets ?? []) {
+    if (changelet.startsWith('touch ')) continue
+    if (!GENERIC_CLUSTER_CHANGELETS.has(changelet)) anchors.add(`changelet:${changelet}`)
+  }
+  for (const filename of pr.signals.fileNames) {
+    const normalized = filename.toLowerCase()
+    if (isSpecificFloodFile(normalized)) anchors.add(`file:${normalized}`)
+  }
+  const signature = titleSignature(pr.title)
+  if (signature) anchors.add(`title:${signature}`)
+  return [...anchors]
+}
+
+function clusterReasons(anchor: string, prs: PullRequest[]) {
+  const reasons = [`${prs.length} PRs share ${anchorLabel(anchor).toLowerCase()}`]
+  const files = topRepeatedValues(prs.flatMap((pr) => pr.signals.fileNames), 2)
+  const changelets = topRepeatedValues(prs.flatMap((pr) => pr.changelets ?? []), 2)
+  if (files.length) reasons.push(`common files: ${files.map((item) => item.label).join(', ')}`)
+  if (changelets.length) reasons.push(`common changelets: ${changelets.map((item) => item.label).join(', ')}`)
+  return reasons.slice(0, 3)
+}
+
+function dedupePrs(prs: PullRequest[]) {
+  return [...new Map(prs.map((pr) => [pr.number, pr])).values()]
+}
+
+function dedupeClusters(clusters: PrCluster[], maxOverlap = 0.65) {
+  const selected: PrCluster[] = []
+  for (const cluster of clusters) {
+    if (selected.every((existing) => clusterOverlap(cluster, existing) <= maxOverlap)) {
+      selected.push(cluster)
+    }
+  }
+  return selected
+}
+
+function clusterOverlap(left: PrCluster, right: PrCluster) {
+  const leftSet = new Set(left.prs)
+  const rightSet = new Set(right.prs)
+  const shared = [...leftSet].filter((number) => rightSet.has(number)).length
+  return shared / Math.min(leftSet.size, rightSet.size)
+}
+
+function countBy<T>(items: T[], getLabel: (item: T) => string, options: CountOptions = {}): TrendItem[] {
+  const counts = new Map<string, number>()
+  for (const item of items) {
+    const label = getLabel(item)
+    if (!label) continue
+    counts.set(label, (counts.get(label) ?? 0) + 1)
+  }
+  const rows = [...counts.entries()].map(([label, count]) => ({ label, count }))
+  const sorted = options.chronological
+    ? rows.sort((a, b) => a.label.localeCompare(b.label))
+    : rows.sort((a, b) => b.count - a.count || a.label.localeCompare(b.label))
+  return sorted.slice(0, options.limit ?? 10)
+}
+
+function topRepeatedValues(values: string[], limit: number) {
+  return countBy(values, (value) => value, { limit }).filter((item) => item.count > 1)
 }
 
 function timeWindowGroups(prs: PullRequest[], windowHours: number, minSize: number) {
@@ -363,6 +471,13 @@ const GENERIC_CHANGELETS = new Set([
   'improve error handling',
 ])
 
+const GENERIC_CLUSTER_CHANGELETS = new Set([
+  ...GENERIC_CHANGELETS,
+  'change async or streaming flow',
+  'change database or persistence behavior',
+  'update examples or cookbook',
+])
+
 const LOW_VALUE_FLAGS = new Set([
   'readme_only_noise',
   'docs_rewrite_noise',
@@ -390,3 +505,8 @@ const TITLE_STOP_WORDS = new Set([
 const DEPENDENCY_FILES = new Set(['package.json', 'pyproject.toml', 'requirements.txt', 'setup.py', 'cargo.toml', 'go.mod'])
 const LOCKFILES = new Set(['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'poetry.lock', 'cargo.lock', 'go.sum'])
 const BROAD_FILES = new Set(['history.md', 'package.json', 'lib/application.js', 'lib/response.js'])
+
+interface CountOptions {
+  limit?: number
+  chronological?: boolean
+}

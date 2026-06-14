@@ -1,4 +1,4 @@
-export type PageKey = 'overview' | 'queue' | 'flood'
+export type PageKey = 'overview' | 'queue' | 'flood' | 'stats'
 
 interface Props {
   active: PageKey
@@ -6,6 +6,7 @@ interface Props {
   counts: {
     prs: number
     flood: number
+    clusters: number
   }
 }
 
@@ -17,12 +18,14 @@ const ITEMS: Array<{
   { key: 'overview', label: 'Overview', description: 'scan health' },
   { key: 'queue', label: 'Queue', description: 'PR worklist' },
   { key: 'flood', label: 'AI Flood', description: 'burst waves' },
+  { key: 'stats', label: 'Stats', description: 'clusters/trends' },
 ]
 
 export function Sidebar({ active, onChange, counts }: Props) {
   const badgeFor = (key: PageKey) => {
     if (key === 'queue') return counts.prs
     if (key === 'flood') return counts.flood
+    if (key === 'stats') return counts.clusters
     return null
   }
 
@@ -38,7 +41,7 @@ export function Sidebar({ active, onChange, counts }: Props) {
               onClick={() => onChange(item.key)}
               className={`flex items-center gap-3 rounded-md border px-3 py-2.5 text-left transition ${
                 selected
-                  ? 'border-zinc-700 bg-zinc-900/65 text-zinc-50'
+                  ? 'border-sky-500/30 bg-sky-500/10 text-zinc-50'
                   : 'border-transparent text-zinc-500 hover:bg-zinc-900/35 hover:text-zinc-200'
               }`}
             >

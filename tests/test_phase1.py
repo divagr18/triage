@@ -332,6 +332,87 @@ class PhaseOneTests(unittest.TestCase):
         self.assertIn("add guard or validation", changelets)
         self.assertIn("change database or persistence behavior", changelets)
 
+    def test_hybrid_similarity_uses_embeddings_and_overlap(self):
+        left = {
+            "title": "fix: mistral params",
+            "body": "",
+            "changelets": ["fix bug", "update model/provider behavior"],
+            "signals": {"fileNames": ["libs/agno/models/mistral.py"], "keywords": ["mistral", "params"]},
+        }
+        right = {
+            "title": "fix: cerebras params",
+            "body": "",
+            "changelets": ["fix bug", "update model/provider behavior"],
+            "signals": {"fileNames": ["libs/agno/models/cerebras.py"], "keywords": ["cerebras", "params"]},
+        }
+
+        score, components = triage.hybrid_similarity(left, right, [1.0, 0.0], [0.9, 0.1])
+
+        self.assertGreater(score, 0.7)
+        self.assertGreater(components["embedding"], 0.9)
+        self.assertEqual(components["changelet"], 1.0)
+
+    def test_build_duplicate_clusters_selects_canonical_candidate(self):
+        prs = [
+            {
+                "number": 1,
+                "title": "fix: forward Mistral params",
+                "changelets": ["fix bug", "update model/provider behavior"],
+                "signals": {
+                    "fileNames": ["libs/agno/models/mistral.py"],
+                    "keywords": ["mistral", "params"],
+                    "hasTests": True,
+                    "ciState": "passing",
+                    "smallDiff": True,
+                    "reviewState": "none",
+                },
+                "flags": [],
+                "contributorTrust": {"score": 70},
+            },
+            {
+                "number": 2,
+                "title": "fix: forward Cerebras params",
+                "changelets": ["fix bug", "update model/provider behavior"],
+                "signals": {
+                    "fileNames": ["libs/agno/models/cerebras.py"],
+                    "keywords": ["cerebras", "params"],
+                    "hasTests": False,
+                    "ciState": "none",
+                    "smallDiff": True,
+                    "reviewState": "none",
+                },
+                "flags": ["description_too_generic"],
+                "contributorTrust": {"score": 45},
+            },
+            {
+                "number": 3,
+                "title": "docs: update cookbook",
+                "changelets": ["update documentation"],
+                "signals": {
+                    "fileNames": ["cookbook/readme.md"],
+                    "keywords": ["docs"],
+                    "hasTests": False,
+                    "ciState": "none",
+                    "smallDiff": True,
+                    "reviewState": "none",
+                },
+                "flags": [],
+                "contributorTrust": {"score": 50},
+            },
+        ]
+
+        with patch("triage.get_pr_embeddings", return_value=[[1, 0], [0.95, 0.05], [0, 1]]):
+            clusters = triage.build_duplicate_clusters(
+                "owner/repo",
+                prs,
+                threshold=0.6,
+                model_name="test-model",
+            )
+
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(clusters[0]["bestPr"], 1)
+        self.assertEqual(clusters[0]["prs"], [1, 2])
+
     def test_contributor_trust_penalizes_risky_low_context_change(self):
         pr = {
             "title": "Update README",

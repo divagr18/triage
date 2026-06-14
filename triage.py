@@ -11,7 +11,9 @@ Phase 1 focuses on GitHub ingestion and cache reliability:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -24,6 +26,7 @@ from typing import Any
 
 CACHE_ROOT = Path(".triage") / "cache"
 SCHEMA_VERSION = 4
+DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 STOP_WORDS = {
     "a",
     "add",
@@ -128,6 +131,8 @@ def main(argv: list[str] | None = None) -> int:
             report_command(args)
         elif args.command == "changelets":
             changelets_command(args)
+        elif args.command == "clusters":
+            clusters_command(args)
         elif args.command == "cache-path":
             print(cache_path_for_repo(args.repo))
         else:
@@ -172,6 +177,13 @@ def build_parser() -> argparse.ArgumentParser:
     changelets = subcommands.add_parser("changelets", help="show semantic changelets from cache")
     changelets.add_argument("repo", help="repository in owner/repo form")
     changelets.add_argument("--limit", type=positive_int, default=20)
+
+    clusters = subcommands.add_parser("clusters", help="show duplicate/similar PR clusters from cache")
+    clusters.add_argument("repo", help="repository in owner/repo form")
+    clusters.add_argument("--threshold", type=float, default=0.48)
+    clusters.add_argument("--limit", type=positive_int, default=20)
+    clusters.add_argument("--model", default=DEFAULT_EMBEDDING_MODEL)
+    clusters.add_argument("--refresh-embeddings", action="store_true")
 
     cache_path = subcommands.add_parser("cache-path", help="print cache file path for a repo")
     cache_path.add_argument("repo", help="repository in owner/repo form")
@@ -231,6 +243,20 @@ def changelets_command(args: argparse.Namespace) -> None:
     data = read_cache(cache_path_for_repo(args.repo))
     attach_deterministic_signals(data)
     print_changelets(data, limit=args.limit)
+
+
+def clusters_command(args: argparse.Namespace) -> None:
+    validate_repo(args.repo)
+    data = read_cache(cache_path_for_repo(args.repo))
+    attach_deterministic_signals(data)
+    data["clusters"] = build_duplicate_clusters(
+        args.repo,
+        data.get("prs") or [],
+        threshold=args.threshold,
+        model_name=args.model,
+        refresh_embeddings=args.refresh_embeddings,
+    )
+    print_clusters(data, limit=args.limit)
 
 
 def scan_github(args: ScanArgs) -> dict[str, Any]:
@@ -854,6 +880,263 @@ def unique_strings(values: list[str]) -> list[str]:
     return result
 
 
+def build_duplicate_clusters(
+    repo: str,
+    prs: list[Any],
+    *,
+    threshold: float,
+    model_name: str,
+    refresh_embeddings: bool = False,
+) -> list[dict[str, Any]]:
+    real_prs = [pr for pr in prs if isinstance(pr, dict)]
+    if len(real_prs) < 2:
+        return []
+
+    embeddings = get_pr_embeddings(repo, real_prs, model_name, refresh=refresh_embeddings)
+    edges: dict[int, list[tuple[int, float, dict[str, float]]]] = {index: [] for index in range(len(real_prs))}
+    for left in range(len(real_prs)):
+        for right in range(left + 1, len(real_prs)):
+            score, components = hybrid_similarity(real_prs[left], real_prs[right], embeddings[left], embeddings[right])
+            if score >= threshold:
+                edges[left].append((right, score, components))
+                edges[right].append((left, score, components))
+
+    clusters: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for index in range(len(real_prs)):
+        if index in seen or not edges[index]:
+            continue
+        component = collect_component(index, edges, seen)
+        if len(component) < 2:
+            continue
+        component_prs = [real_prs[i] for i in component]
+        pair_scores = [
+            score
+            for i in component
+            for neighbor, score, _ in edges[i]
+            if i < neighbor and neighbor in component
+        ]
+        best = max(component_prs, key=canonical_score)
+        best_index = real_prs.index(best)
+        clusters.append(
+            {
+                "id": f"cluster_{len(clusters) + 1:03}",
+                "label": label_cluster(component_prs),
+                "prs": [pr.get("number") for pr in component_prs],
+                "size": len(component_prs),
+                "averageSimilarity": round(sum(pair_scores) / len(pair_scores), 3) if pair_scores else 0,
+                "bestPr": best.get("number"),
+                "bestTitle": best.get("title"),
+                "bestScore": canonical_score(best),
+                "members": sorted(
+                    [
+                        {
+                            "number": pr.get("number"),
+                            "title": pr.get("title"),
+                            "canonicalScore": canonical_score(pr),
+                            "trustScore": (pr.get("contributorTrust") or {}).get("score"),
+                            "flags": pr.get("flags") or [],
+                            "changelets": pr.get("changelets") or [],
+                            "similarityToBest": round(
+                                hybrid_similarity(pr, best, embeddings[i], embeddings[best_index])[0],
+                                3,
+                            ),
+                        }
+                        for i, pr in ((i, real_prs[i]) for i in component)
+                    ],
+                    key=lambda member: (-member["canonicalScore"], member["number"] or 0),
+                ),
+            }
+        )
+    return sorted(clusters, key=lambda cluster: (-cluster["size"], -cluster["averageSimilarity"], cluster["id"]))
+
+
+def get_pr_embeddings(
+    repo: str,
+    prs: list[dict[str, Any]],
+    model_name: str,
+    *,
+    refresh: bool,
+) -> list[list[float]]:
+    cache_path = embedding_cache_path(repo, model_name)
+    cache = {"model": model_name, "items": {}} if refresh else read_embedding_cache(cache_path, model_name)
+    items = cache.setdefault("items", {})
+    texts = [embedding_text_for_pr(pr) for pr in prs]
+    keys = [embedding_cache_key(pr, text) for pr, text in zip(prs, texts)]
+    missing_indices = [index for index, key in enumerate(keys) if key not in items]
+
+    if missing_indices:
+        vectors = encode_texts_with_model([texts[index] for index in missing_indices], model_name)
+        for index, vector in zip(missing_indices, vectors):
+            items[keys[index]] = {
+                "pr": prs[index].get("number"),
+                "textHash": sha256_text(texts[index]),
+                "embedding": [round(float(value), 8) for value in vector],
+            }
+        write_embedding_cache(cache_path, cache)
+
+    return [items[key]["embedding"] for key in keys]
+
+
+def embedding_text_for_pr(pr: dict[str, Any]) -> str:
+    pieces = [
+        f"Title: {pr.get('title') or ''}",
+        f"Body: {truncate_text(pr.get('body') or '', 2500)}",
+        "Changelets: " + "; ".join(pr.get("changelets") or []),
+        "Files: " + "; ".join((pr.get("signals") or {}).get("fileNames") or []),
+        "Keywords: " + "; ".join((pr.get("signals") or {}).get("keywords") or []),
+    ]
+    return "\n".join(piece for piece in pieces if piece.strip())
+
+
+def encode_texts_with_model(texts: list[str], model_name: str) -> list[list[float]]:
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError as error:
+        raise TriageError(
+            "sentence-transformers is required for clustering; run `python -m pip install -r requirements.txt`"
+        ) from error
+
+    model = SentenceTransformer(model_name)
+    embeddings = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+    return [list(vector) for vector in embeddings]
+
+
+def embedding_cache_path(repo: str, model_name: str) -> Path:
+    repo_dir = cache_path_for_repo(repo).parent
+    return repo_dir / f"embeddings_{safe_segment(model_name.replace('/', '_'))}.json"
+
+
+def read_embedding_cache(path: Path, model_name: str) -> dict[str, Any]:
+    if not path.exists():
+        return {"model": model_name, "items": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"model": model_name, "items": {}}
+    if data.get("model") != model_name or not isinstance(data.get("items"), dict):
+        return {"model": model_name, "items": {}}
+    return data
+
+
+def write_embedding_cache(path: Path, cache: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cache, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def embedding_cache_key(pr: dict[str, Any], text: str) -> str:
+    return f"{pr.get('number')}:{sha256_text(text)}"
+
+
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def truncate_text(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit] + "\n[truncated]"
+
+
+def hybrid_similarity(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    left_embedding: list[float],
+    right_embedding: list[float],
+) -> tuple[float, dict[str, float]]:
+    embedding = cosine_similarity(left_embedding, right_embedding)
+    changelet = jaccard(left.get("changelets") or [], right.get("changelets") or [])
+    files = jaccard((left.get("signals") or {}).get("fileNames") or [], (right.get("signals") or {}).get("fileNames") or [])
+    keywords = jaccard((left.get("signals") or {}).get("keywords") or [], (right.get("signals") or {}).get("keywords") or [])
+    issues = jaccard(extract_issue_refs(left), extract_issue_refs(right))
+    score = 0.65 * embedding + 0.15 * changelet + 0.12 * files + 0.05 * keywords + 0.03 * issues
+    components = {
+        "embedding": round(embedding, 3),
+        "changelet": round(changelet, 3),
+        "files": round(files, 3),
+        "keywords": round(keywords, 3),
+        "issues": round(issues, 3),
+    }
+    return round(score, 3), components
+
+
+def cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    dot = sum(a * b for a, b in zip(left, right))
+    left_norm = sum(value * value for value in left) ** 0.5
+    right_norm = sum(value * value for value in right) ** 0.5
+    if left_norm == 0 or right_norm == 0:
+        return 0.0
+    return max(0.0, min(1.0, dot / (left_norm * right_norm)))
+
+
+def jaccard(left: list[Any], right: list[Any]) -> float:
+    left_set = {str(value).lower() for value in left if value}
+    right_set = {str(value).lower() for value in right if value}
+    if not left_set and not right_set:
+        return 0.0
+    return len(left_set & right_set) / len(left_set | right_set)
+
+
+def extract_issue_refs(pr: dict[str, Any]) -> list[str]:
+    text = f"{pr.get('title') or ''}\n{pr.get('body') or ''}"
+    return re.findall(r"#\d+", text)
+
+
+def collect_component(
+    start: int,
+    edges: dict[int, list[tuple[int, float, dict[str, float]]]],
+    seen: set[int],
+) -> list[int]:
+    stack = [start]
+    component: list[int] = []
+    while stack:
+        index = stack.pop()
+        if index in seen:
+            continue
+        seen.add(index)
+        component.append(index)
+        stack.extend(neighbor for neighbor, _, _ in edges[index] if neighbor not in seen)
+    return sorted(component)
+
+
+def label_cluster(prs: list[dict[str, Any]]) -> str:
+    counts: dict[str, int] = {}
+    for pr in prs:
+        for changelet in pr.get("changelets") or []:
+            counts[changelet] = counts.get(changelet, 0) + 1
+    if counts:
+        return max(counts.items(), key=lambda item: (item[1], item[0]))[0]
+    title_keywords: dict[str, int] = {}
+    for pr in prs:
+        for keyword in extract_keywords(pr.get("title") or "", limit=5):
+            title_keywords[keyword] = title_keywords.get(keyword, 0) + 1
+    if title_keywords:
+        return " / ".join(keyword for keyword, _ in sorted(title_keywords.items(), key=lambda item: (-item[1], item[0]))[:3])
+    return "similar PRs"
+
+
+def canonical_score(pr: dict[str, Any]) -> int:
+    signals = pr.get("signals") or {}
+    flags = pr.get("flags") or []
+    trust = pr.get("contributorTrust") or {}
+    score = int_or_zero(trust.get("score"))
+    if signals.get("hasTests"):
+        score += 12
+    if signals.get("ciState") == "passing":
+        score += 12
+    if signals.get("smallDiff"):
+        score += 8
+    if signals.get("reviewState") in {"approved", "reviewed"}:
+        score += 8
+    score -= 5 * len([flag for flag in flags if flag in LOW_VALUE_FLAGS])
+    if "core_change_without_tests" in flags:
+        score -= 10
+    if "large_unrelated_refactor" in flags:
+        score -= 10
+    return clamp_score(score)
+
+
 def compute_signal_summary(prs: list[Any]) -> dict[str, Any]:
     flag_counts: dict[str, int] = {}
     bucket_counts: dict[str, int] = {}
@@ -1293,6 +1576,32 @@ def print_changelets(data: dict[str, Any], *, limit: int) -> None:
         print(f"#{pr.get('number')} {pr.get('title')}")
         for changelet in pr.get("changelets") or []:
             print(f"- {changelet}")
+        print()
+
+
+def print_clusters(data: dict[str, Any], *, limit: int) -> None:
+    clusters = [cluster for cluster in data.get("clusters", []) if isinstance(cluster, dict)]
+    print("Semantic PR Clusters")
+    print("--------------------")
+    print(f"Repo: {data.get('repo', 'unknown')}")
+    print(f"Clusters: {len(clusters)}")
+    print()
+    if not clusters:
+        print("No clusters above the selected threshold.")
+        return
+    for cluster in clusters[:limit]:
+        print(
+            f"{cluster.get('id')} · {cluster.get('label')} "
+            f"({cluster.get('size')} PRs, avg similarity {cluster.get('averageSimilarity')})"
+        )
+        print(f"Best candidate: #{cluster.get('bestPr')} {cluster.get('bestTitle')} [{cluster.get('bestScore')}/100]")
+        for member in cluster.get("members") or []:
+            flags = ", ".join(member.get("flags") or [])
+            suffix = f" flags: {flags}" if flags else ""
+            print(
+                f"- #{member.get('number')} {member.get('canonicalScore')}/100 "
+                f"sim {member.get('similarityToBest')}: {member.get('title')}{suffix}"
+            )
         print()
 
 

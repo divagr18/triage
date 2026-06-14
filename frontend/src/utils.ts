@@ -96,9 +96,9 @@ export function isTrustedCleanPr(pr: PullRequest): boolean {
 }
 
 export function buildAiFloodWaves(prs: PullRequest[], options: FloodOptions = {}): FloodWave[] {
-  const windowHours = options.windowHours ?? 72
+  const windowHours = options.windowHours ?? 48
   const minSize = options.minSize ?? 3
-  const threshold = options.threshold ?? 0.55
+  const threshold = options.threshold ?? 0.72
   const candidates = new Map<string, { label: string; prs: PullRequest[] }>()
 
   const addCandidate = (label: string, group: PullRequest[]) => {
@@ -127,11 +127,40 @@ export function buildAiFloodWaves(prs: PullRequest[], options: FloodOptions = {}
   }
 
   const waves = [...candidates.values()]
+    .filter(({ prs: group }) => floodGroupHasRepeatedIntent(group))
     .map(({ label, prs: group }) => scoreFloodWave(label, group))
     .filter((wave) => wave.score >= threshold)
     .sort((a, b) => b.score - a.score || b.prs.length - a.prs.length || a.id.localeCompare(b.id))
 
   return dedupeFloodWaves(waves)
+}
+
+export function buildFloodClusters(prs: PullRequest[], waves: FloodWave[]): PrCluster[] {
+  const byNumber = new Map(prs.map((pr) => [pr.number, pr]))
+  const clusters = waves
+    .map((wave) => {
+      const members = wave.prs
+        .map((number) => byNumber.get(number))
+        .filter((pr): pr is PullRequest => Boolean(pr))
+      if (members.length < 3) return null
+      const best = [...members].sort((a, b) => canonicalScore(b) - canonicalScore(a))[0]
+      return {
+        id: `flood_cluster_${safeId(wave.label)}_${wave.prs.join('_')}`,
+        label: wave.label,
+        prs: members.map((pr) => pr.number),
+        size: members.length,
+        bestPr: best.number,
+        bestTitle: best.title,
+        reasons: [
+          `${members.length} PRs in ${wave.window}`,
+          ...wave.reasons.filter((reason) => !reason.startsWith(`${members.length} PRs`)).slice(0, 2),
+        ],
+      }
+    })
+    .filter((cluster): cluster is PrCluster => Boolean(cluster))
+    .sort((a, b) => b.size - a.size || a.label.localeCompare(b.label))
+
+  return dedupeClusters(clusters, 0.55).slice(0, 18)
 }
 
 export function buildPrClusters(prs: PullRequest[], minSize = 2): PrCluster[] {
@@ -183,12 +212,15 @@ function floodAnchors(pr: PullRequest): string[] {
   const anchors = new Set<string>()
   for (const changelet of pr.changelets ?? []) {
     if (changelet.startsWith('touch ')) continue
-    if (GENERIC_CHANGELETS.has(changelet)) continue
-    anchors.add(`changelet:${changelet}`)
+    if (changelet === 'edit README only' || changelet === 'update documentation') {
+      anchors.add(`changelet:${changelet}`)
+    } else if (isSpecificFloodChangelet(changelet)) {
+      anchors.add(`changelet:${changelet}`)
+    }
   }
   for (const filename of pr.signals.fileNames) {
     const normalized = filename.toLowerCase()
-    if (isSpecificFloodFile(normalized) || ['readme.md', 'history.md', 'changelog.md'].includes(normalized)) {
+    if (pr.signals.docsOnly && ['readme.md', 'history.md', 'changelog.md'].includes(normalized)) {
       anchors.add(`file:${normalized}`)
     }
   }
@@ -288,7 +320,16 @@ function scoreFloodWave(label: string, prs: PullRequest[]): FloodWave {
   const noReview = prs.filter((pr) => pr.signals.reviewState === 'none').length
   const lowTrust = prs.filter((pr) => pr.contributorTrust.score < 55).length
   const repeatedFiles = topRepeatedCount(prs.flatMap((pr) => pr.signals.fileNames))
-  const repeatedChangelets = topRepeatedCount(prs.flatMap((pr) => pr.changelets ?? []))
+  const repeatedChangelets = topRepeatedCount(
+    prs.flatMap((pr) =>
+      (pr.changelets ?? []).filter(
+        (changelet) =>
+          isSpecificFloodChangelet(changelet) ||
+          changelet === 'edit README only' ||
+          changelet === 'update documentation',
+      ),
+    ),
+  )
   const repeatedTitles = topRepeatedCount(prs.map((pr) => titleSignature(pr.title)))
 
   let score = Math.min(0.25, 0.05 * count)
@@ -351,6 +392,34 @@ function floodReasons(values: FloodReasonInputs) {
   return reasons.slice(0, 6)
 }
 
+function floodGroupHasRepeatedIntent(prs: PullRequest[]) {
+  const count = prs.length
+  const majority = Math.max(2, Math.floor(count / 2))
+  const repeatedTitles = topRepeatedCount(prs.map((pr) => titleSignature(pr.title)))
+  const repeatedChangelets = topRepeatedCount(
+    prs.flatMap((pr) =>
+      (pr.changelets ?? []).filter(
+        (changelet) =>
+          isSpecificFloodChangelet(changelet) ||
+          changelet === 'edit README only' ||
+          changelet === 'update documentation',
+      ),
+    ),
+  )
+  if (repeatedTitles >= majority || repeatedChangelets >= majority) return true
+
+  const docsOnly = prs.filter((pr) => pr.signals.docsOnly)
+  if (docsOnly.length >= majority) {
+    const docFiles = docsOnly.flatMap((pr) =>
+      pr.signals.fileNames
+        .map((filename) => filename.toLowerCase())
+        .filter((filename) => ['readme.md', 'history.md', 'changelog.md'].includes(filename)),
+    )
+    return topRepeatedCount(docFiles) >= majority
+  }
+  return false
+}
+
 function dedupeFloodWaves(waves: FloodWave[], maxOverlap = 0.55) {
   const selected: FloodWave[] = []
   for (const wave of waves) {
@@ -403,6 +472,14 @@ function isSpecificFloodFile(filename: string) {
   if (BROAD_FILES.has(filename)) return false
   const name = filename.split('/').pop() ?? ''
   return !DEPENDENCY_FILES.has(name) && !LOCKFILES.has(name)
+}
+
+function isSpecificFloodChangelet(changelet: string) {
+  const normalized = changelet.trim().toLowerCase().replace(/\s+/g, ' ')
+  if (!normalized || normalized.startsWith('touch ')) return false
+  if (GENERIC_FLOOD_CHANGELETS.has(normalized)) return false
+  const words = normalized.match(/[a-z][a-z0-9_-]{2,}/g) ?? []
+  return words.length >= 3
 }
 
 function topRepeatedCount(values: string[]) {
@@ -476,6 +553,15 @@ const GENERIC_CLUSTER_CHANGELETS = new Set([
   'change async or streaming flow',
   'change database or persistence behavior',
   'update examples or cookbook',
+])
+
+const GENERIC_FLOOD_CHANGELETS = new Set([
+  ...GENERIC_CLUSTER_CHANGELETS,
+  'add guard or validation',
+  'add or modify tool integration',
+  'modify dependency metadata',
+  'modify project configuration',
+  'update model/provider behavior',
 ])
 
 const LOW_VALUE_FLAGS = new Set([

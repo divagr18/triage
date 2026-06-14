@@ -190,10 +190,10 @@ def build_parser() -> argparse.ArgumentParser:
     flood = subcommands.add_parser("flood", help="detect likely AI-flood PR waves from cache")
     flood.add_argument("repo", help="repository in owner/repo form")
     flood.add_argument("--since", help="created-at lower bound, for example 2026-05-01")
-    flood.add_argument("--window-hours", type=positive_int, default=72)
+    flood.add_argument("--window-hours", type=positive_int, default=48)
     flood.add_argument("--min-size", type=positive_int, default=3)
-    flood.add_argument("--threshold", type=float, default=0.55)
-    flood.add_argument("--cluster-threshold", type=float, default=0.62)
+    flood.add_argument("--threshold", type=float, default=0.72)
+    flood.add_argument("--cluster-threshold", type=float, default=0.72)
     flood.add_argument("--limit", type=positive_int, default=20)
     flood.add_argument("--model", default=DEFAULT_EMBEDDING_MODEL)
     flood.add_argument("--refresh-embeddings", action="store_true")
@@ -1041,6 +1041,8 @@ def build_ai_flood_waves(
 
     waves: list[dict[str, Any]] = []
     for label, source, group in candidates.values():
+        if not flood_group_has_repeated_intent(group, source):
+            continue
         wave = score_flood_wave(label, source, group)
         if wave["score"] >= threshold:
             waves.append(wave)
@@ -1083,14 +1085,14 @@ def flood_anchors_for_pr(pr: dict[str, Any]) -> list[str]:
     for changelet in pr.get("changelets") or []:
         if changelet.startswith("touch "):
             continue
-        if changelet in {"edit README only", "update documentation", "modify dependency metadata"}:
+        if changelet in {"edit README only", "update documentation"}:
             anchors.append(f"changelet:{changelet}")
-        elif changelet not in GENERIC_CLUSTER_CHANGELETS:
+        elif is_specific_flood_changelet(changelet):
             anchors.append(f"changelet:{changelet}")
 
     for filename in signals.get("fileNames") or []:
         normalized = normalize_path(filename)
-        if normalized in {"readme.md", "history.md", "changelog.md"} or is_specific_cluster_file(normalized):
+        if signals.get("docsOnly") and normalized in {"readme.md", "history.md", "changelog.md"}:
             anchors.append(f"file:{normalized}")
 
     signature = title_signature(pr.get("title") or "")
@@ -1139,6 +1141,7 @@ def score_flood_wave(label: str, source: str, prs: list[dict[str, Any]]) -> dict
         changelet
         for pr in prs
         for changelet in pr.get("changelets") or []
+        if is_specific_flood_changelet(changelet) or changelet in {"edit README only", "update documentation"}
     )
     repeated_titles = top_repeated_count(title_signature(pr.get("title") or "") for pr in prs)
 
@@ -1237,6 +1240,32 @@ def flood_reasons(**values: Any) -> list[str]:
     if int_or_zero(values.get("repeated_titles")) >= max(2, count // 2):
         reasons.append("near-duplicate title intent")
     return reasons[:8]
+
+
+def flood_group_has_repeated_intent(group: list[dict[str, Any]], source: str) -> bool:
+    if source == "semantic_cluster":
+        return True
+    count = len(group)
+    majority = max(2, count // 2)
+    repeated_titles = top_repeated_count(title_signature(pr.get("title") or "") for pr in group)
+    repeated_changelets = top_repeated_count(
+        changelet
+        for pr in group
+        for changelet in pr.get("changelets") or []
+        if is_specific_flood_changelet(changelet) or changelet in {"edit README only", "update documentation"}
+    )
+    if repeated_titles >= majority or repeated_changelets >= majority:
+        return True
+    docs_only = [pr for pr in group if (pr.get("signals") or {}).get("docsOnly")]
+    if len(docs_only) >= majority:
+        doc_files = [
+            normalize_path(filename)
+            for pr in docs_only
+            for filename in (pr.get("signals") or {}).get("fileNames") or []
+            if normalize_path(filename) in {"readme.md", "history.md", "changelog.md"}
+        ]
+        return top_repeated_count(doc_files) >= majority
+    return False
 
 
 def is_low_context_pr(pr: dict[str, Any]) -> bool:
@@ -1427,6 +1456,15 @@ GENERIC_CLUSTER_CHANGELETS = {
     "touch lib/response.js",
 }
 
+GENERIC_FLOOD_CHANGELETS = {
+    *GENERIC_CLUSTER_CHANGELETS,
+    "add guard or validation",
+    "add or modify tool integration",
+    "update model/provider behavior",
+    "modify dependency metadata",
+    "modify project configuration",
+}
+
 BROAD_CLUSTER_FILES = {
     "history.md",
     "package.json",
@@ -1436,11 +1474,15 @@ BROAD_CLUSTER_FILES = {
 
 
 def pair_has_specific_overlap(left: dict[str, Any], right: dict[str, Any], components: dict[str, float]) -> bool:
-    if components.get("issues", 0) > 0:
+    strong_text = components.get("embedding", 0) >= 0.72
+    title_match = title_signature(left.get("title") or "") == title_signature(right.get("title") or "") != ""
+    if components.get("issues", 0) > 0 and (strong_text or title_match):
         return True
-    if shared_specific_files(left, right):
+    if shared_specific_changelets(left, right) and (strong_text or title_match or components.get("keywords", 0) >= 0.25):
         return True
-    if shared_specific_changelets(left, right):
+    if shared_specific_files(left, right) and strong_text and (
+        components.get("changelet", 0) >= 0.35 or components.get("keywords", 0) >= 0.25 or title_match
+    ):
         return True
     return False
 
@@ -1473,6 +1515,16 @@ def is_specific_cluster_file(filename: str) -> bool:
     if normalized.startswith("examples/"):
         return False
     return True
+
+
+def is_specific_flood_changelet(changelet: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(changelet).strip().lower())
+    if not normalized or normalized.startswith("touch "):
+        return False
+    if normalized in GENERIC_FLOOD_CHANGELETS:
+        return False
+    words = re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", normalized)
+    return len(words) >= 3
 
 
 def cosine_similarity(left: list[float], right: list[float]) -> float:

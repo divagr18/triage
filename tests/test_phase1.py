@@ -601,6 +601,52 @@ class PhaseOneTests(unittest.TestCase):
 
         self.assertEqual(waves, [])
 
+    def test_ai_flood_rejects_same_file_without_repeated_intent(self):
+        prs = []
+        cases = [
+            (20, "00", "fix: handle timeout in provider", "timeout"),
+            (21, "06", "feat: expose provider telemetry", "telemetry"),
+            (22, "12", "refactor: simplify provider config", "config"),
+        ]
+        for number, hour, title, keyword in cases:
+            pr = {
+                "number": number,
+                "title": title,
+                "body": "Implements a focused code change for a different maintainer concern.",
+                "createdAt": f"2026-06-01T{hour}:00:00Z",
+                "additions": 12,
+                "deletions": 3,
+                "changedFiles": 1,
+                "checks": [],
+                "reviews": [],
+                "files": [{"filename": "libs/agno/provider.py", "patch": f"@@\n+{keyword} change"}],
+                "contributor": {
+                    "accountAssociation": "FIRST_TIMER",
+                    "priorMergedPrs": 0,
+                    "currentOpenPrs": 1,
+                    "currentOpenPrsInScan": 1,
+                },
+            }
+            pr["signals"] = triage.compute_pr_signals(pr)
+            pr["flags"] = triage.compute_pr_flags(pr)
+            pr["changelets"] = ["fix bug", "touch core runtime"]
+            pr["contributorTrust"] = triage.compute_contributor_trust(pr)
+            prs.append(pr)
+
+        with patch("triage.build_duplicate_clusters", return_value=[]):
+            waves = triage.build_ai_flood_waves(
+                "owner/repo",
+                prs,
+                since=None,
+                window_hours=24,
+                min_size=3,
+                threshold=0.55,
+                cluster_threshold=0.62,
+                model_name="test-model",
+            )
+
+        self.assertEqual(waves, [])
+
 
 if __name__ == "__main__":
     unittest.main()

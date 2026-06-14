@@ -12,7 +12,7 @@ import { Sidebar, type PageKey } from './components/Sidebar'
 import { StatsPage } from './components/StatsPage'
 import { useRepos, useRepoData } from './useTriageData'
 import type { PullRequest, TriageCache } from './types'
-import { buildAiFloodWaves, buildPrClusters, buildTrendReport } from './utils'
+import { buildAiFloodWaves, buildFloodClusters, buildPrClusters, buildTrendReport } from './utils'
 
 function EmptyState() {
   return (
@@ -115,6 +115,10 @@ export default function App() {
   const selectedPr = selectedPrState?.repoSlug === selectedSlug ? selectedPrState.pr : null
   const selectPr = (pr: PullRequest) => setSelectedPrState({ repoSlug: selectedSlug, pr })
   const floodWaves = useMemo(() => (data ? buildAiFloodWaves(data.prs) : []), [data])
+  const floodClusters = useMemo(
+    () => (data ? buildFloodClusters(data.prs, floodWaves) : []),
+    [data, floodWaves],
+  )
   const clusters = useMemo(() => (data ? buildPrClusters(data.prs) : []), [data])
   const trends = useMemo(() => (data ? buildTrendReport(data.prs) : null), [data])
   const floodPrNumbers = useMemo(
@@ -139,7 +143,7 @@ export default function App() {
                 onChange={setPage}
                 counts={{
                   prs: data.prs.length,
-                  flood: floodWaves.length,
+                  flood: floodClusters.length,
                   clusters: clusters.length,
                 }}
               />
@@ -180,7 +184,7 @@ export default function App() {
                       <FloodWaves
                         waves={floodWaves}
                         prs={data.prs}
-                        clusters={clusters}
+                        clusters={floodClusters}
                         onSelect={selectPr}
                         limit={3}
                         actionLabel="Open flood"
@@ -215,7 +219,7 @@ export default function App() {
                     <FloodWaves
                       waves={floodWaves}
                       prs={data.prs}
-                      clusters={clusters}
+                      clusters={floodClusters}
                       onSelect={selectPr}
                       limit={30}
                       pageMode

@@ -8,6 +8,7 @@ import { FocusQueue } from './components/FocusQueue'
 import { FloodWaves } from './components/FloodWaves'
 import { PrList } from './components/PrList'
 import { PrDetail } from './components/PrDetail'
+import { Sidebar, type PageKey } from './components/Sidebar'
 import { useRepos, useRepoData } from './useTriageData'
 import type { PullRequest, TriageCache } from './types'
 import { buildAiFloodWaves } from './utils'
@@ -40,37 +41,37 @@ function ScanHeader({ data }: { data: TriageCache }) {
   const source = data.source?.replace(/_/g, ' ') || 'cache'
 
   return (
-    <section className="rounded-lg border border-zinc-800/80 bg-zinc-950/60 p-5 shadow-[0_18px_60px_rgba(0,0,0,0.26)] sm:p-6">
-      <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+    <section className="surface rounded-lg p-4 sm:p-5">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
-            <span className="inline-flex items-center gap-1.5 rounded-md border border-zinc-800 bg-black/35 px-2.5 py-1">
+            <span className="inline-flex items-center gap-1.5 rounded-md border border-zinc-800/70 bg-black/20 px-2 py-0.5">
               <GitPullRequest size={12} />
               {data.state}
             </span>
-            <span className="rounded-md border border-zinc-800 bg-black/35 px-2.5 py-1">
+            <span className="rounded-md border border-zinc-800/70 bg-black/20 px-2 py-0.5">
               schema v{data.schemaVersion}
             </span>
-            <span className="rounded-md border border-zinc-800 bg-black/35 px-2.5 py-1">
+            <span className="rounded-md border border-zinc-800/70 bg-black/20 px-2 py-0.5">
               {source}
             </span>
           </div>
-          <h2 className="truncate text-2xl font-semibold tracking-tight text-white sm:text-3xl">
+          <h2 className="truncate text-2xl font-semibold tracking-tight text-white">
             {data.repo}
           </h2>
           <p className="mt-2 text-sm text-zinc-500">Scanned {scannedAt}</p>
         </div>
 
         <div className="grid gap-2 text-xs text-zinc-500 sm:grid-cols-3 lg:min-w-[460px]">
-          <div className="rounded-md border border-zinc-800 bg-black/30 p-3">
+          <div className="rounded-md border border-zinc-800/70 bg-black/[0.18] p-3">
             <div className="mb-1 font-medium text-zinc-300">Cache</div>
             <div className="truncate">{data.limit} PR limit</div>
           </div>
-          <div className="rounded-md border border-zinc-800 bg-black/30 p-3">
+          <div className="rounded-md border border-zinc-800/70 bg-black/[0.18] p-3">
             <div className="mb-1 font-medium text-zinc-300">Window</div>
             <div className="truncate">{data.since || 'latest available'}</div>
           </div>
-          <div className="rounded-md border border-zinc-800 bg-black/30 p-3">
+          <div className="rounded-md border border-zinc-800/70 bg-black/[0.18] p-3">
             <div className="mb-1 font-medium text-zinc-300">Signals</div>
             <div className="truncate">{Object.keys(data.signalSummary.flagCounts).length} flag types</div>
           </div>
@@ -87,9 +88,18 @@ function CommandStrip({ data }: { data: TriageCache }) {
   }, [data.limit, data.repo, data.since, data.state])
 
   return (
-    <div className="flex min-w-0 items-center gap-3 rounded-lg border border-zinc-800/80 bg-black/40 px-4 py-3 text-xs text-zinc-500">
+    <div className="surface-soft flex min-w-0 items-center gap-3 rounded-lg px-4 py-2.5 text-xs text-zinc-500">
       <TerminalSquare size={15} className="shrink-0 text-zinc-400" />
       <code className="min-w-0 truncate font-mono text-zinc-300">{command}</code>
+    </div>
+  )
+}
+
+function PageHeader({ title, description }: { title: string; description: string }) {
+  return (
+    <div className="mb-4">
+      <h2 className="text-xl font-semibold tracking-tight text-zinc-50">{title}</h2>
+      <p className="mt-1 text-sm text-zinc-500">{description}</p>
     </div>
   )
 }
@@ -103,6 +113,7 @@ export default function App() {
     repoSlug: string | null
     pr: PullRequest
   } | null>(null)
+  const [page, setPage] = useState<PageKey>('overview')
 
   const selectedPr = selectedPrState?.repoSlug === selectedSlug ? selectedPrState.pr : null
   const selectPr = (pr: PullRequest) => setSelectedPrState({ repoSlug: selectedSlug, pr })
@@ -113,7 +124,7 @@ export default function App() {
   )
 
   return (
-    <div className="flex min-h-screen flex-col bg-[radial-gradient(circle_at_top,#171717_0,#050505_38%,#000_72%)]">
+    <div className="flex min-h-screen flex-col bg-[#030303]">
       <Header repos={repos} selected={selectedSlug} onSelect={setSelectedSlugOverride} />
 
       <main className="flex-1">
@@ -122,24 +133,76 @@ export default function App() {
         ) : !data ? (
           <EmptyState />
         ) : (
-          <div className="mx-auto flex max-w-[1800px] flex-col gap-6 px-5 py-6 sm:px-6 lg:px-8">
-            <ScanHeader data={data} />
-            <Metrics data={data} floodWaves={floodWaves} />
-            <CommandStrip data={data} />
-
-            <div className="grid grid-cols-1 gap-6 xl:min-h-0 xl:grid-cols-[minmax(0,1fr)_380px] 2xl:grid-cols-[minmax(0,1fr)_430px]">
-              <PrList
-                prs={data.prs}
-                selected={selectedPr}
-                onSelect={selectPr}
-                floodPrNumbers={floodPrNumbers}
+          <div className="mx-auto flex max-w-[1800px] flex-col gap-5 px-5 py-5 sm:px-6 lg:px-8">
+            <div className="grid gap-5 xl:grid-cols-[240px_minmax(0,1fr)]">
+              <Sidebar
+                active={page}
+                onChange={setPage}
+                counts={{
+                  prs: data.prs.length,
+                  flood: floodWaves.length,
+                  flags: Object.keys(data.signalSummary.flagCounts).length,
+                }}
               />
-              <aside className="space-y-5 xl:max-h-[calc(100vh-23rem)] xl:overflow-y-auto xl:pr-1">
-                <FloodWaves waves={floodWaves} prs={data.prs} onSelect={selectPr} />
-                <FocusQueue prs={data.prs} onSelect={selectPr} />
-                <FileBucketsChart summary={data.signalSummary} />
-                <FlagsList summary={data.signalSummary} />
-              </aside>
+
+              <section className="min-w-0">
+                {page === 'overview' && (
+                  <div className="space-y-5">
+                    <ScanHeader data={data} />
+                    <Metrics data={data} floodWaves={floodWaves} />
+                    <CommandStrip data={data} />
+                    <div className="grid gap-5 xl:grid-cols-2">
+                      <FocusQueue prs={data.prs} onSelect={selectPr} />
+                      <FloodWaves waves={floodWaves} prs={data.prs} onSelect={selectPr} limit={3} />
+                    </div>
+                  </div>
+                )}
+
+                {page === 'queue' && (
+                  <>
+                    <PageHeader
+                      title="Review Queue"
+                      description="Search, sort, and filter cached pull requests without the overview noise."
+                    />
+                    <PrList
+                      prs={data.prs}
+                      selected={selectedPr}
+                      onSelect={selectPr}
+                      floodPrNumbers={floodPrNumbers}
+                      pageMode
+                    />
+                  </>
+                )}
+
+                {page === 'flood' && (
+                  <>
+                    <PageHeader
+                      title="AI Flood"
+                      description="Burst patterns from cached PR timing, repeated files, changelets, low context, and trust signals."
+                    />
+                    <FloodWaves
+                      waves={floodWaves}
+                      prs={data.prs}
+                      onSelect={selectPr}
+                      limit={30}
+                      pageMode
+                    />
+                  </>
+                )}
+
+                {page === 'signals' && (
+                  <>
+                    <PageHeader
+                      title="Signals"
+                      description="Deterministic flags and file-category distribution for the current cache."
+                    />
+                    <div className="grid gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+                      <FileBucketsChart summary={data.signalSummary} />
+                      <FlagsList summary={data.signalSummary} />
+                    </div>
+                  </>
+                )}
+              </section>
             </div>
           </div>
         )}

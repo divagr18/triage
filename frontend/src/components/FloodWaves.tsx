@@ -6,20 +6,22 @@ interface Props {
   waves: FloodWave[]
   prs: PullRequest[]
   onSelect: (pr: PullRequest) => void
+  limit?: number
+  pageMode?: boolean
 }
 
-export function FloodWaves({ waves, prs, onSelect }: Props) {
+export function FloodWaves({ waves, prs, onSelect, limit = 5, pageMode = false }: Props) {
   const byNumber = new Map(prs.map((pr) => [pr.number, pr]))
-  const shown = waves.slice(0, 5)
+  const shown = waves.slice(0, limit)
 
   return (
-    <section className="rounded-lg border border-zinc-800/80 bg-zinc-950/60 p-4 shadow-[0_18px_55px_rgba(0,0,0,0.28)]">
+    <section className={`${pageMode ? 'surface h-[calc(100vh-9rem)] overflow-y-auto' : 'surface-soft'} rounded-lg p-4`}>
       <div className="mb-4 flex items-center justify-between">
         <div>
           <h3 className="text-sm font-semibold text-white">AI flood waves</h3>
           <p className="mt-1 text-xs text-zinc-500">Cache-derived burst patterns</p>
         </div>
-        <div className="flex h-8 w-8 items-center justify-center rounded-md border border-sky-400/20 bg-sky-400/10 text-sky-300">
+        <div className="flex h-8 w-8 items-center justify-center rounded-md border border-zinc-800 bg-zinc-900/35 text-zinc-400">
           <Waves size={15} />
         </div>
       </div>
@@ -29,11 +31,11 @@ export function FloodWaves({ waves, prs, onSelect }: Props) {
           No waves above the default threshold.
         </div>
       ) : (
-        <div className="space-y-2">
+        <div className={pageMode ? 'grid gap-3 xl:grid-cols-2' : 'space-y-2'}>
           {shown.map((wave) => {
             const best = byNumber.get(wave.bestPr)
             return (
-              <div key={wave.id} className="rounded-md border border-zinc-800 bg-black/30 p-3">
+              <div key={wave.id} className="rounded-md border border-zinc-800/80 bg-black/20 p-3">
                 <div className="mb-2 flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="line-clamp-2 text-xs font-medium leading-5 text-zinc-200">
@@ -43,7 +45,7 @@ export function FloodWaves({ waves, prs, onSelect }: Props) {
                       {wave.prs.length} PRs / {wave.window}
                     </div>
                   </div>
-                  <span className="rounded-md border border-sky-400/20 bg-sky-400/10 px-2 py-1 text-xs font-semibold text-sky-300">
+                  <span className="rounded-md border border-zinc-800 bg-zinc-900/35 px-2 py-1 text-xs font-semibold text-zinc-300">
                     {formatNumber(wave.score)}
                   </span>
                 </div>
@@ -51,7 +53,7 @@ export function FloodWaves({ waves, prs, onSelect }: Props) {
                 {best && (
                   <button
                     onClick={() => onSelect(best)}
-                    className="mb-2 w-full rounded border border-zinc-800 bg-zinc-900/45 px-2 py-1.5 text-left text-[11px] text-zinc-400 transition hover:border-zinc-700 hover:text-zinc-200"
+                    className="mb-2 w-full rounded border border-zinc-800/80 bg-zinc-900/25 px-2 py-1.5 text-left text-[11px] text-zinc-400 transition hover:border-zinc-700 hover:text-zinc-200"
                   >
                     Review first: #{best.number} {best.title}
                   </button>
@@ -64,7 +66,7 @@ export function FloodWaves({ waves, prs, onSelect }: Props) {
                       <button
                         key={number}
                         onClick={() => pr && onSelect(pr)}
-                        className="rounded border border-zinc-800 bg-zinc-900/60 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 transition hover:border-zinc-700 hover:text-white"
+                        className="rounded border border-zinc-800 bg-zinc-900/35 px-1.5 py-0.5 font-mono text-[10px] text-zinc-500 transition hover:border-zinc-700 hover:text-white"
                       >
                         #{number}
                       </button>

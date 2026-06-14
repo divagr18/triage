@@ -9,9 +9,10 @@ interface Props {
   selected: PullRequest | null
   onSelect: (pr: PullRequest) => void
   floodPrNumbers: Set<number>
+  pageMode?: boolean
 }
 
-export function PrList({ prs, selected, onSelect, floodPrNumbers }: Props) {
+export function PrList({ prs, selected, onSelect, floodPrNumbers, pageMode = false }: Props) {
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<SortKey>('newest')
   const [filter, setFilter] = useState<FilterKey>('all')
@@ -36,7 +37,11 @@ export function PrList({ prs, selected, onSelect, floodPrNumbers }: Props) {
   }, [prs, query, sort, filter, floodPrNumbers])
 
   return (
-    <section className="flex min-w-0 flex-col rounded-lg border border-zinc-800/80 bg-zinc-950/45 p-4 shadow-[0_18px_70px_rgba(0,0,0,0.28)] sm:p-5 xl:max-h-[calc(100vh-23rem)]">
+    <section
+      className={`surface flex min-w-0 flex-col rounded-lg p-4 sm:p-5 ${
+        pageMode ? 'xl:h-[calc(100vh-9rem)]' : 'xl:max-h-[calc(100vh-23rem)]'
+      }`}
+    >
       <div className="mb-5 shrink-0 flex flex-col gap-4 2xl:flex-row 2xl:items-end 2xl:justify-between">
         <div>
           <h2 className="text-lg font-semibold tracking-tight text-white">Pull Requests</h2>
@@ -55,7 +60,7 @@ export function PrList({ prs, selected, onSelect, floodPrNumbers }: Props) {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search title, author, #..."
-              className="h-9 w-full rounded-md border border-zinc-800 bg-black/40 pl-9 pr-4 text-sm text-zinc-200 outline-none transition placeholder:text-zinc-600 hover:border-zinc-700 focus:border-zinc-500 focus:ring-1 focus:ring-zinc-500 lg:w-72"
+              className="h-9 w-full rounded-md border border-zinc-800 bg-black/25 pl-9 pr-4 text-sm text-zinc-200 outline-none transition placeholder:text-zinc-600 hover:border-zinc-700 focus:border-zinc-500 focus:ring-1 focus:ring-zinc-500 lg:w-72"
             />
           </div>
           <div className="flex items-center gap-2">
@@ -63,7 +68,7 @@ export function PrList({ prs, selected, onSelect, floodPrNumbers }: Props) {
             <select
               value={filter}
               onChange={(e) => setFilter(e.target.value as FilterKey)}
-              className="h-9 min-w-[8.5rem] appearance-none rounded-md border border-zinc-800 bg-black/40 px-3 pr-7 text-sm text-zinc-200 outline-none hover:border-zinc-700"
+              className="h-9 min-w-[8.5rem] appearance-none rounded-md border border-zinc-800 bg-black/25 px-3 pr-7 text-sm text-zinc-200 outline-none hover:border-zinc-700"
             >
               <option value="all">All PRs</option>
               <option value="flagged">Flagged</option>
@@ -75,7 +80,7 @@ export function PrList({ prs, selected, onSelect, floodPrNumbers }: Props) {
             <select
               value={sort}
               onChange={(e) => setSort(e.target.value as SortKey)}
-              className="h-9 min-w-[8.5rem] appearance-none rounded-md border border-zinc-800 bg-black/40 px-3 pr-7 text-sm text-zinc-200 outline-none hover:border-zinc-700"
+              className="h-9 min-w-[8.5rem] appearance-none rounded-md border border-zinc-800 bg-black/25 px-3 pr-7 text-sm text-zinc-200 outline-none hover:border-zinc-700"
             >
               <option value="newest">Newest</option>
               <option value="oldest">Oldest</option>

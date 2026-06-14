@@ -15,10 +15,10 @@ export function PrCard({ pr, selected, onClick }: Props) {
   return (
     <button
       onClick={onClick}
-      className={`group relative min-h-[158px] w-full rounded-lg border bg-black/30 p-4 text-left transition ${
+      className={`group relative min-h-[132px] w-full rounded-lg border p-4 text-left transition ${
         selected
-          ? 'border-white/30 bg-white/[0.05] ring-1 ring-white/20'
-          : 'border-zinc-800 hover:border-zinc-700 hover:bg-zinc-900/45'
+          ? 'border-zinc-600 bg-zinc-900/55 ring-1 ring-zinc-700'
+          : 'border-zinc-800/80 bg-black/20 hover:border-zinc-700 hover:bg-zinc-900/25'
       }`}
     >
       <div className="flex items-start justify-between gap-4">
@@ -35,7 +35,7 @@ export function PrCard({ pr, selected, onClick }: Props) {
           <h4 className="line-clamp-2 min-h-10 text-sm font-medium leading-5 text-zinc-100 group-hover:text-white">
             {pr.title}
           </h4>
-          <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-zinc-500">
+          <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-zinc-500">
             <span className="flex items-center gap-1">
               <GitCommitHorizontal size={12} />
               {pr.author.login}
@@ -44,8 +44,8 @@ export function PrCard({ pr, selected, onClick }: Props) {
               <FileCode2 size={12} />
               {pr.changedFiles} files
             </span>
-            <span className="flex items-center gap-1 text-emerald-400/80">+{pr.additions}</span>
-            <span className="flex items-center gap-1 text-red-400/80">-{pr.deletions}</span>
+            <span className="flex items-center gap-1 text-emerald-300/70">+{pr.additions}</span>
+            <span className="flex items-center gap-1 text-red-300/70">-{pr.deletions}</span>
             {signals.ciState !== 'none' && (
               <span className={`flex items-center gap-1 ${ciColor(signals.ciState)}`}>
                 <CheckCircle2 size={12} />
@@ -69,7 +69,7 @@ export function PrCard({ pr, selected, onClick }: Props) {
             {trust.score}
           </span>
           {pr.flags.length > 0 && (
-            <span className="flex items-center gap-1 text-[10px] font-medium text-amber-400">
+            <span className="flex items-center gap-1 text-[10px] font-medium text-zinc-500">
               <ShieldAlert size={12} />
               {pr.flags.length}
             </span>
@@ -82,7 +82,7 @@ export function PrCard({ pr, selected, onClick }: Props) {
           {pr.changelets.slice(0, 3).map((changelet) => (
             <span
               key={changelet}
-              className="rounded border border-sky-400/15 bg-sky-400/10 px-2 py-0.5 text-[10px] text-sky-300/90"
+              className="rounded border border-zinc-800 bg-zinc-900/35 px-2 py-0.5 text-[10px] text-zinc-400"
             >
               {changelet}
             </span>
@@ -94,11 +94,11 @@ export function PrCard({ pr, selected, onClick }: Props) {
       )}
 
       {pr.flags.length > 0 && (
-        <div className="mt-3 flex flex-wrap gap-1.5">
+        <div className="mt-2 flex flex-wrap gap-1.5">
           {pr.flags.slice(0, 3).map((flag) => (
             <span
               key={flag}
-              className="rounded-md border border-zinc-800 bg-zinc-900/60 px-2 py-0.5 text-[10px] text-zinc-400"
+              className="rounded border border-zinc-800/80 bg-transparent px-2 py-0.5 text-[10px] text-zinc-500"
             >
               {formatFlag(flag)}
             </span>

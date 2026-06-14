@@ -22,21 +22,21 @@ function Metric({
   tone?: 'neutral' | 'success' | 'warning' | 'danger'
 }) {
   const toneClass = {
-    neutral: 'text-zinc-200 bg-zinc-900/60 border-zinc-700',
-    success: 'text-emerald-400 bg-emerald-500/5 border-emerald-500/15',
-    warning: 'text-amber-400 bg-amber-500/5 border-amber-500/15',
-    danger: 'text-red-400 bg-red-500/5 border-red-500/15',
+    neutral: 'text-zinc-400 bg-zinc-900/40 border-zinc-800',
+    success: 'text-emerald-300 bg-transparent border-zinc-800',
+    warning: 'text-amber-300 bg-transparent border-zinc-800',
+    danger: 'text-red-300 bg-transparent border-zinc-800',
   }[tone]
 
   return (
-    <div className="rounded-lg border border-zinc-800/80 bg-zinc-950/60 p-4 shadow-[0_14px_45px_rgba(0,0,0,0.22)] transition hover:border-zinc-700">
-      <div className="mb-3 flex items-center justify-between">
-        <span className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">{label}</span>
-        <div className={`flex h-8 w-8 items-center justify-center rounded-md border ${toneClass}`}>
-          <Icon size={16} />
+    <div className="surface-soft rounded-lg p-4 transition hover:border-zinc-700/80">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-500">{label}</span>
+        <div className={`flex h-7 w-7 items-center justify-center rounded-md border ${toneClass}`}>
+          <Icon size={14} />
         </div>
       </div>
-      <div className="text-2xl font-semibold tracking-tight text-white 2xl:text-3xl">{value}</div>
+      <div className="text-2xl font-semibold tracking-tight text-zinc-50">{value}</div>
       {sub && <div className="mt-1 text-xs text-zinc-500">{sub}</div>}
     </div>
   )

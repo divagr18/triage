@@ -27,13 +27,13 @@ export function FocusQueue({ prs, onSelect }: Props) {
     .slice(0, 6)
 
   return (
-    <section className="rounded-lg border border-zinc-800/80 bg-zinc-950/60 p-4 shadow-[0_18px_55px_rgba(0,0,0,0.28)]">
+    <section className="surface-soft rounded-lg p-4">
       <div className="mb-4 flex items-center justify-between">
         <div>
           <h3 className="text-sm font-semibold text-white">Focus queue</h3>
           <p className="mt-1 text-xs text-zinc-500">Highest-risk cached PRs</p>
         </div>
-        <div className="flex h-8 w-8 items-center justify-center rounded-md border border-amber-400/20 bg-amber-400/10 text-amber-300">
+        <div className="flex h-8 w-8 items-center justify-center rounded-md border border-zinc-800 bg-zinc-900/35 text-zinc-400">
           <ShieldAlert size={15} />
         </div>
       </div>
@@ -48,7 +48,7 @@ export function FocusQueue({ prs, onSelect }: Props) {
             <button
               key={pr.number}
               onClick={() => onSelect(pr)}
-              className="group w-full rounded-md border border-zinc-800 bg-black/30 p-3 text-left transition hover:border-zinc-700 hover:bg-zinc-900/60"
+              className="group w-full rounded-md border border-zinc-800/80 bg-black/20 p-3 text-left transition hover:border-zinc-700 hover:bg-zinc-900/30"
             >
               <div className="mb-2 flex items-start justify-between gap-3">
                 <div className="min-w-0">
@@ -75,7 +75,7 @@ export function FocusQueue({ prs, onSelect }: Props) {
                   {pr.flags.slice(0, 2).map((flag) => (
                     <span
                       key={flag}
-                      className="rounded border border-amber-400/15 bg-amber-400/10 px-1.5 py-0.5 text-[10px] text-amber-300"
+                      className="rounded border border-zinc-800 bg-zinc-900/40 px-1.5 py-0.5 text-[10px] text-zinc-400"
                     >
                       {formatFlag(flag)}
                     </span>

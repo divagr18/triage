@@ -20,15 +20,15 @@ export function formatFlag(flag: string): string {
 export function trustColor(bucket: string): string {
   switch (bucket) {
     case 'high':
-      return 'text-emerald-400 bg-emerald-400/10 border-emerald-400/20'
+      return 'text-emerald-300 bg-emerald-400/[0.06] border-zinc-800'
     case 'medium':
-      return 'text-amber-400 bg-amber-400/10 border-amber-400/20'
+      return 'text-amber-300 bg-amber-400/[0.06] border-zinc-800'
     case 'low':
-      return 'text-orange-400 bg-orange-400/10 border-orange-400/20'
+      return 'text-orange-300 bg-orange-400/[0.06] border-zinc-800'
     case 'very_low':
-      return 'text-red-400 bg-red-400/10 border-red-400/20'
+      return 'text-red-300 bg-red-400/[0.06] border-zinc-800'
     default:
-      return 'text-zinc-400 bg-zinc-400/10 border-zinc-400/20'
+      return 'text-zinc-400 bg-zinc-400/[0.06] border-zinc-800'
   }
 }
 
@@ -60,15 +60,15 @@ export function reviewColor(state: string): string {
 
 export function flagColor(flag: string): string {
   if (flag.includes('risk') || flag.includes('failing') || flag.includes('without_tests')) {
-    return 'text-red-400 border-red-400/20 bg-red-400/10'
+    return 'text-red-300 border-zinc-800 bg-zinc-900/40'
   }
   if (flag.includes('noise') || flag.includes('generic') || flag.includes('churn') || flag.includes('lockfile')) {
-    return 'text-amber-400 border-amber-400/20 bg-amber-400/10'
+    return 'text-amber-300 border-zinc-800 bg-zinc-900/40'
   }
   if (flag.includes('no_human_review')) {
-    return 'text-zinc-400 border-zinc-400/20 bg-zinc-400/10'
+    return 'text-zinc-400 border-zinc-800 bg-zinc-900/35'
   }
-  return 'text-blue-400 border-blue-400/20 bg-blue-400/10'
+  return 'text-sky-300 border-zinc-800 bg-zinc-900/35'
 }
 
 export function sortPrs(prs: PullRequest[], key: SortKey): PullRequest[] {

@@ -151,6 +151,18 @@ export interface TriageCache {
   signalSummary: SignalSummary
 }
 
+export interface FloodWave {
+  id: string
+  label: string
+  prs: number[]
+  score: number
+  window: string
+  bestPr: number
+  bestTitle: string
+  reasons: string[]
+  recommendedAction: string
+}
+
 export interface RepoMeta {
   slug: string
   repo: string

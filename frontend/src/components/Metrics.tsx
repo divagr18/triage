@@ -1,9 +1,11 @@
-import { AlertTriangle, GitPullRequest, ShieldAlert, TrendingUp } from 'lucide-react'
+import { AlertTriangle, GitPullRequest, ShieldAlert, TrendingUp, Waves } from 'lucide-react'
+import type { FloodWave } from '../types'
 import type { TriageCache } from '../types'
 import { formatNumber } from '../utils'
 
 interface Props {
   data: TriageCache
+  floodWaves: FloodWave[]
 }
 
 function Metric({
@@ -40,12 +42,12 @@ function Metric({
   )
 }
 
-export function Metrics({ data }: Props) {
+export function Metrics({ data, floodWaves }: Props) {
   const summary = data.signalSummary
   const avg = summary.averageContributorTrust ?? 0
 
   return (
-    <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+    <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
       <Metric
         label="Pull Requests"
         value={String(data.prs.length)}
@@ -73,6 +75,13 @@ export function Metrics({ data }: Props) {
         sub="new contributor risk"
         icon={ShieldAlert}
         tone={summary.riskyNewContributorPrs > 0 ? 'danger' : 'success'}
+      />
+      <Metric
+        label="AI Flood"
+        value={String(floodWaves.length)}
+        sub={floodWaves.length ? 'burst patterns' : 'none detected'}
+        icon={Waves}
+        tone={floodWaves.length > 0 ? 'warning' : 'success'}
       />
     </section>
   )

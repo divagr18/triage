@@ -5,10 +5,12 @@ import { Metrics } from './components/Metrics'
 import { FileBucketsChart } from './components/FileBucketsChart'
 import { FlagsList } from './components/FlagsList'
 import { FocusQueue } from './components/FocusQueue'
+import { FloodWaves } from './components/FloodWaves'
 import { PrList } from './components/PrList'
 import { PrDetail } from './components/PrDetail'
 import { useRepos, useRepoData } from './useTriageData'
 import type { PullRequest, TriageCache } from './types'
+import { buildAiFloodWaves } from './utils'
 
 function EmptyState() {
   return (
@@ -104,6 +106,11 @@ export default function App() {
 
   const selectedPr = selectedPrState?.repoSlug === selectedSlug ? selectedPrState.pr : null
   const selectPr = (pr: PullRequest) => setSelectedPrState({ repoSlug: selectedSlug, pr })
+  const floodWaves = useMemo(() => (data ? buildAiFloodWaves(data.prs) : []), [data])
+  const floodPrNumbers = useMemo(
+    () => new Set(floodWaves.flatMap((wave) => wave.prs)),
+    [floodWaves],
+  )
 
   return (
     <div className="flex min-h-screen flex-col bg-[radial-gradient(circle_at_top,#171717_0,#050505_38%,#000_72%)]">
@@ -117,12 +124,18 @@ export default function App() {
         ) : (
           <div className="mx-auto flex max-w-[1800px] flex-col gap-6 px-5 py-6 sm:px-6 lg:px-8">
             <ScanHeader data={data} />
-            <Metrics data={data} />
+            <Metrics data={data} floodWaves={floodWaves} />
             <CommandStrip data={data} />
 
-            <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_380px] 2xl:grid-cols-[minmax(0,1fr)_430px]">
-              <PrList prs={data.prs} selected={selectedPr} onSelect={selectPr} />
-              <aside className="space-y-5 xl:sticky xl:top-24 xl:self-start">
+            <div className="grid grid-cols-1 gap-6 xl:min-h-0 xl:grid-cols-[minmax(0,1fr)_380px] 2xl:grid-cols-[minmax(0,1fr)_430px]">
+              <PrList
+                prs={data.prs}
+                selected={selectedPr}
+                onSelect={selectPr}
+                floodPrNumbers={floodPrNumbers}
+              />
+              <aside className="space-y-5 xl:max-h-[calc(100vh-23rem)] xl:overflow-y-auto xl:pr-1">
+                <FloodWaves waves={floodWaves} prs={data.prs} onSelect={selectPr} />
                 <FocusQueue prs={data.prs} onSelect={selectPr} />
                 <FileBucketsChart summary={data.signalSummary} />
                 <FlagsList summary={data.signalSummary} />

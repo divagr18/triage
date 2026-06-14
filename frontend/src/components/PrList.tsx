@@ -8,9 +8,10 @@ interface Props {
   prs: PullRequest[]
   selected: PullRequest | null
   onSelect: (pr: PullRequest) => void
+  floodPrNumbers: Set<number>
 }
 
-export function PrList({ prs, selected, onSelect }: Props) {
+export function PrList({ prs, selected, onSelect, floodPrNumbers }: Props) {
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<SortKey>('newest')
   const [filter, setFilter] = useState<FilterKey>('all')
@@ -30,12 +31,13 @@ export function PrList({ prs, selected, onSelect }: Props) {
     if (filter === 'low-trust') result = result.filter((pr) => pr.contributorTrust.score < 55)
     if (filter === 'needs-review') result = result.filter((pr) => pr.signals.reviewState === 'none')
     if (filter === 'trusted-clean') result = result.filter(isTrustedCleanPr)
+    if (filter === 'ai-flood') result = result.filter((pr) => floodPrNumbers.has(pr.number))
     return sortPrs(result, sort)
-  }, [prs, query, sort, filter])
+  }, [prs, query, sort, filter, floodPrNumbers])
 
   return (
-    <section className="min-w-0 rounded-lg border border-zinc-800/80 bg-zinc-950/45 p-4 shadow-[0_18px_70px_rgba(0,0,0,0.28)] sm:p-5">
-      <div className="mb-5 flex flex-col gap-4 2xl:flex-row 2xl:items-end 2xl:justify-between">
+    <section className="flex min-w-0 flex-col rounded-lg border border-zinc-800/80 bg-zinc-950/45 p-4 shadow-[0_18px_70px_rgba(0,0,0,0.28)] sm:p-5 xl:max-h-[calc(100vh-23rem)]">
+      <div className="mb-5 shrink-0 flex flex-col gap-4 2xl:flex-row 2xl:items-end 2xl:justify-between">
         <div>
           <h2 className="text-lg font-semibold tracking-tight text-white">Pull Requests</h2>
           <p className="mt-1 text-xs text-zinc-500">
@@ -68,6 +70,7 @@ export function PrList({ prs, selected, onSelect }: Props) {
               <option value="low-trust">Low trust</option>
               <option value="needs-review">Needs review</option>
               <option value="trusted-clean">Trusted clean</option>
+              <option value="ai-flood">AI flood</option>
             </select>
             <select
               value={sort}
@@ -84,7 +87,7 @@ export function PrList({ prs, selected, onSelect }: Props) {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-3 2xl:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 overflow-y-auto pr-1 2xl:grid-cols-2 xl:min-h-0 xl:flex-1">
         {filtered.map((pr) => (
           <PrCard
             key={pr.number}
@@ -103,4 +106,4 @@ export function PrList({ prs, selected, onSelect }: Props) {
   )
 }
 
-type FilterKey = 'all' | 'flagged' | 'low-trust' | 'needs-review' | 'trusted-clean'
+type FilterKey = 'all' | 'flagged' | 'low-trust' | 'needs-review' | 'trusted-clean' | 'ai-flood'

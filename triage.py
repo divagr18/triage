@@ -114,6 +114,7 @@ class ScanArgs:
     refresh: bool
     offline: bool
     history_limit: int
+    api: str
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -150,10 +151,16 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--refresh", action="store_true", help="ignore existing cache and call GitHub")
     scan.add_argument("--offline", action="store_true", help="read cache only; never call GitHub")
     scan.add_argument(
+        "--api",
+        choices=["rest", "graphql"],
+        default="rest",
+        help="GitHub API path to use for live scans; REST avoids large GraphQL list failures",
+    )
+    scan.add_argument(
         "--history-limit",
         type=positive_int,
         default=50,
-        help="max prior PRs to inspect per contributor",
+        help="GraphQL mode only: max prior PRs to inspect per contributor via GitHub Search",
     )
 
     report = subcommands.add_parser("report", help="show deterministic signal summary from cache")
@@ -180,6 +187,7 @@ def scan_command(args: argparse.Namespace) -> None:
         refresh=args.refresh,
         offline=args.offline,
         history_limit=args.history_limit,
+        api=args.api,
     )
     validate_repo(scan_args.repo)
     path = cache_path_for_repo(scan_args.repo)
@@ -212,7 +220,13 @@ def report_command(args: argparse.Namespace) -> None:
 
 
 def scan_github(args: ScanArgs) -> dict[str, Any]:
-    raw_prs = fetch_pr_list(args)
+    if args.api == "graphql":
+        return scan_github_graphql(args)
+    return scan_github_rest(args)
+
+
+def scan_github_graphql(args: ScanArgs) -> dict[str, Any]:
+    raw_prs = fetch_pr_list_graphql(args)
     normalized_prs: list[dict[str, Any]] = []
     author_logins = sorted({login_from_author(pr.get("author")) for pr in raw_prs if login_from_author(pr.get("author"))})
     contributor_history = {
@@ -230,7 +244,7 @@ def scan_github(args: ScanArgs) -> dict[str, Any]:
         number = raw.get("number")
         if not isinstance(number, int):
             continue
-        files = fetch_pr_files(args.repo, number)
+        files = fetch_pr_files_rest(args.repo, number)
         normalized = normalize_pr(raw, files)
         login = normalized["author"]["login"]
         history = contributor_history.get(login, empty_contributor_history(login))
@@ -250,14 +264,56 @@ def scan_github(args: ScanArgs) -> dict[str, Any]:
         "limit": args.limit,
         "since": args.since,
         "scannedAt": datetime.now(timezone.utc).isoformat(),
-        "source": "gh",
+        "source": "gh-graphql",
         "prs": normalized_prs,
     }
     attach_deterministic_signals(data)
     return data
 
 
-def fetch_pr_list(args: ScanArgs) -> list[dict[str, Any]]:
+def scan_github_rest(args: ScanArgs) -> dict[str, Any]:
+    raw_prs = fetch_pr_list_rest(args)
+    contributor_counts = fetch_repo_contributor_counts(args.repo)
+    current_open_counts: dict[str, int] = {}
+    for pr in raw_prs:
+        login = login_from_rest_user(pr.get("user"))
+        if login:
+            current_open_counts[login] = current_open_counts.get(login, 0) + 1
+
+    normalized_prs: list[dict[str, Any]] = []
+    for raw in raw_prs:
+        number = raw.get("number")
+        if not isinstance(number, int):
+            continue
+        files = fetch_pr_files_rest(args.repo, number)
+        reviews = fetch_pr_reviews_rest(args.repo, number)
+        normalized = normalize_rest_pr(raw, files, reviews)
+        login = normalized["author"]["login"]
+        contributor = rest_contributor_history(
+            login,
+            normalized["author"].get("association"),
+            contributor_counts,
+            current_open_counts.get(login, 0),
+        )
+        normalized["contributor"] = contributor
+        normalized_prs.append(normalized)
+
+    data = {
+        "schemaVersion": 3,
+        "tool": "triage",
+        "repo": args.repo,
+        "state": args.state,
+        "limit": args.limit,
+        "since": args.since,
+        "scannedAt": datetime.now(timezone.utc).isoformat(),
+        "source": "gh-rest",
+        "prs": normalized_prs,
+    }
+    attach_deterministic_signals(data)
+    return data
+
+
+def fetch_pr_list_graphql(args: ScanArgs) -> list[dict[str, Any]]:
     command = [
         "gh",
         "pr",
@@ -276,15 +332,99 @@ def fetch_pr_list(args: ScanArgs) -> list[dict[str, Any]]:
     return run_gh_json(command)
 
 
-def fetch_pr_files(repo: str, number: int) -> list[dict[str, Any]]:
+def fetch_pr_list_rest(args: ScanArgs) -> list[dict[str, Any]]:
+    state = "closed" if args.state == "merged" else args.state
+    per_page = min(100, args.limit)
+    page = 1
+    prs: list[dict[str, Any]] = []
+    while len(prs) < args.limit:
+        endpoint = (
+            f"repos/{args.repo}/pulls"
+            f"?state={state}&sort=created&direction=desc&per_page={per_page}&page={page}"
+        )
+        batch = run_gh_json(["gh", "api", endpoint])
+        if not isinstance(batch, list) or not batch:
+            break
+        for pr in batch:
+            if not isinstance(pr, dict):
+                continue
+            if args.since and not iso_date_at_or_after(pr.get("created_at"), args.since):
+                continue
+            if args.state == "merged" and not pr.get("merged_at"):
+                continue
+            prs.append(pr)
+            if len(prs) >= args.limit:
+                break
+        if len(batch) < per_page:
+            break
+        page += 1
+    return prs
+
+
+def fetch_pr_files_rest(repo: str, number: int) -> list[dict[str, Any]]:
     command = [
         "gh",
         "api",
-        f"repos/{repo}/pulls/{number}/files",
+        f"repos/{repo}/pulls/{number}/files?per_page=100",
         "--paginate",
     ]
     raw_files = run_gh_json(command)
     return [normalize_file(file) for file in raw_files if isinstance(file, dict)]
+
+
+def fetch_pr_reviews_rest(repo: str, number: int) -> list[dict[str, Any]]:
+    command = [
+        "gh",
+        "api",
+        f"repos/{repo}/pulls/{number}/reviews?per_page=100",
+        "--paginate",
+    ]
+    raw_reviews = run_gh_json(command)
+    return [normalize_rest_review(review) for review in raw_reviews if isinstance(review, dict)]
+
+
+def fetch_repo_contributor_counts(repo: str, limit: int = 500) -> dict[str, int]:
+    per_page = 100
+    page = 1
+    counts: dict[str, int] = {}
+    while len(counts) < limit:
+        endpoint = f"repos/{repo}/contributors?per_page={per_page}&page={page}"
+        batch = run_gh_json(["gh", "api", endpoint])
+        if not isinstance(batch, list) or not batch:
+            break
+        for contributor in batch:
+            if not isinstance(contributor, dict):
+                continue
+            login = contributor.get("login")
+            if login:
+                counts[login] = int_or_zero(contributor.get("contributions"))
+            if len(counts) >= limit:
+                break
+        if len(batch) < per_page:
+            break
+        page += 1
+    return counts
+
+
+def rest_contributor_history(
+    login: str,
+    account_association: Any,
+    contributor_counts: dict[str, int],
+    current_open_in_scan: int,
+) -> dict[str, Any]:
+    commit_contributions = contributor_counts.get(login, 0)
+    return {
+        "login": login,
+        "priorMergedPrs": 0,
+        "priorClosedPrs": 0,
+        "priorClosedUnmergedPrs": 0,
+        "currentOpenPrs": current_open_in_scan,
+        "currentOpenPrsInScan": current_open_in_scan,
+        "accountAssociation": account_association,
+        "repoCommitContributions": commit_contributions,
+        "historySource": "rest_contributors",
+        "recentPrUrls": [],
+    }
 
 
 def fetch_contributor_history(repo: str, login: str, limit: int) -> dict[str, Any]:
@@ -364,6 +504,33 @@ def normalize_pr(raw: dict[str, Any], files: list[dict[str, Any]]) -> dict[str, 
     }
 
 
+def normalize_rest_pr(raw: dict[str, Any], files: list[dict[str, Any]], reviews: list[dict[str, Any]]) -> dict[str, Any]:
+    labels = raw.get("labels") or []
+    additions = sum(int_or_zero(file.get("additions")) for file in files)
+    deletions = sum(int_or_zero(file.get("deletions")) for file in files)
+    return {
+        "number": raw.get("number"),
+        "title": raw.get("title") or "",
+        "body": raw.get("body") or "",
+        "author": normalize_rest_author(raw.get("user"), raw.get("author_association")),
+        "createdAt": raw.get("created_at"),
+        "updatedAt": raw.get("updated_at"),
+        "url": raw.get("html_url"),
+        "state": str(raw.get("state") or "").upper(),
+        "isDraft": bool(raw.get("draft", False)),
+        "additions": additions,
+        "deletions": deletions,
+        "changedFiles": len(files),
+        "labels": [normalize_label(label) for label in labels if isinstance(label, dict)],
+        "reviews": reviews,
+        "checks": [],
+        "reviewDecision": infer_review_decision(reviews),
+        "mergeable": raw.get("mergeable"),
+        "mergeStateStatus": raw.get("mergeable_state"),
+        "files": files,
+    }
+
+
 def normalize_author(author: Any) -> dict[str, Any]:
     if not isinstance(author, dict):
         return {"login": "unknown", "name": "", "association": None}
@@ -371,6 +538,16 @@ def normalize_author(author: Any) -> dict[str, Any]:
         "login": author.get("login") or "unknown",
         "name": author.get("name") or "",
         "association": author.get("association") or author.get("authorAssociation"),
+    }
+
+
+def normalize_rest_author(user: Any, association: Any) -> dict[str, Any]:
+    if not isinstance(user, dict):
+        return {"login": "unknown", "name": "", "association": association}
+    return {
+        "login": user.get("login") or "unknown",
+        "name": "",
+        "association": association,
     }
 
 
@@ -387,6 +564,25 @@ def normalize_review(review: dict[str, Any]) -> dict[str, Any]:
         "state": review.get("state"),
         "submittedAt": review.get("submittedAt"),
     }
+
+
+def normalize_rest_review(review: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "author": login_from_rest_user(review.get("user")),
+        "state": review.get("state"),
+        "submittedAt": review.get("submitted_at"),
+    }
+
+
+def infer_review_decision(reviews: list[dict[str, Any]]) -> str | None:
+    states = {str(review.get("state") or "").upper() for review in reviews}
+    if "CHANGES_REQUESTED" in states:
+        return "CHANGES_REQUESTED"
+    if "APPROVED" in states:
+        return "APPROVED"
+    if reviews:
+        return "REVIEWED"
+    return None
 
 
 def normalize_check(check: dict[str, Any]) -> dict[str, Any]:
@@ -744,6 +940,7 @@ def compute_contributor_trust(pr: dict[str, Any]) -> dict[str, Any]:
     prior_closed_unmerged = int_or_zero(contributor.get("priorClosedUnmergedPrs"))
     current_open = int_or_zero(contributor.get("currentOpenPrs"))
     open_in_scan = int_or_zero(contributor.get("currentOpenPrsInScan"))
+    repo_commit_contributions = int_or_zero(contributor.get("repoCommitContributions"))
 
     if association in {"OWNER", "MEMBER", "COLLABORATOR"}:
         score += 25
@@ -765,8 +962,15 @@ def compute_contributor_trust(pr: dict[str, Any]) -> dict[str, Any]:
         score += 8
         positives.append(f"{prior_merged} prior merged PR")
     else:
-        score -= 10
-        risks.append("no prior merged PRs found in repo")
+        if repo_commit_contributions >= 100:
+            score += 12
+            positives.append(f"{repo_commit_contributions} repo commit contributions")
+        elif repo_commit_contributions >= 10:
+            score += 6
+            positives.append(f"{repo_commit_contributions} repo commit contributions")
+        else:
+            score -= 10
+            risks.append("no prior merged PRs found in repo")
 
     if prior_closed_unmerged >= 5:
         score -= 12
@@ -849,13 +1053,16 @@ def clamp_score(score: int) -> int:
 
 
 def run_gh_json(command: list[str]) -> Any:
-    result = subprocess.run(command, text=True, capture_output=True)
+    result = subprocess.run(command, text=True, capture_output=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
         command_text = " ".join(command)
         message = result.stderr.strip() or result.stdout.strip() or "unknown gh error"
         raise TriageError(f"`{command_text}` failed: {message}")
+    if not result.stdout.strip():
+        command_text = " ".join(command)
+        raise TriageError(f"`{command_text}` returned empty output")
     try:
-        return json.loads(result.stdout or "[]")
+        return json.loads(result.stdout)
     except json.JSONDecodeError as error:
         raise TriageError(f"gh returned invalid JSON: {error}") from error
 
@@ -972,6 +1179,12 @@ def login_from_author(author: Any) -> str:
     return ""
 
 
+def login_from_rest_user(user: Any) -> str:
+    if isinstance(user, dict):
+        return user.get("login") or ""
+    return ""
+
+
 def int_or_zero(value: Any) -> int:
     try:
         return int(value)
@@ -998,6 +1211,17 @@ def unique_urls(items: list[dict[str, Any]], limit: int) -> list[str]:
         if len(urls) >= limit:
             break
     return urls
+
+
+def iso_date_at_or_after(value: Any, lower_bound: str) -> bool:
+    if not value:
+        return False
+    try:
+        date = datetime.fromisoformat(str(value).replace("Z", "+00:00")).date()
+        lower = datetime.fromisoformat(lower_bound).date()
+    except ValueError:
+        return True
+    return date >= lower
 
 
 if __name__ == "__main__":

@@ -6,11 +6,15 @@ This is a CLI-first maintainer assistant. It currently implements GitHub
 ingestion through `gh`, normalized local caching, date/window filtering,
 per-PR file patch collection, lightweight contributor history, and
 deterministic triage signals, including an explainable contributor trust score.
+Live scans default to GitHub REST because it behaves better on large PR lists
+than field-heavy GraphQL queries.
 
 ## Usage
 
 ```bash
 python triage.py scan microsoft/coreutils --state open --limit 50 --since 2026-05-01
+python triage.py scan agno-agi/agno --state open --limit 200 --refresh
+python triage.py scan agno-agi/agno --api graphql --limit 20 --refresh
 python triage.py scan microsoft/coreutils --offline
 python triage.py report microsoft/coreutils
 python triage.py cache-path microsoft/coreutils
@@ -29,6 +33,11 @@ gh auth login
 ```
 
 Offline scans read the latest cache and never call GitHub.
+
+REST scans use GitHub's core REST API for PR lists, files, reviews, and
+repository contributor counts. GraphQL scans are still available with
+`--api graphql`, but they also use the Search API for per-author PR history and
+can hit tighter search limits on large repos.
 
 ## Deterministic Signals
 

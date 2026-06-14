@@ -1,7 +1,9 @@
 import json
 import tempfile
 import unittest
+from subprocess import CompletedProcess
 from pathlib import Path
+from unittest.mock import patch
 
 import triage
 
@@ -192,6 +194,79 @@ class PhaseOneTests(unittest.TestCase):
         self.assertGreaterEqual(trust["score"], 75)
         self.assertEqual(trust["bucket"], "high")
         self.assertTrue(trust["positives"])
+
+    def test_rest_normalization_uses_files_and_reviews(self):
+        raw = {
+            "number": 99,
+            "title": "fix: rest ingestion",
+            "body": "Uses REST API",
+            "user": {"login": "octo"},
+            "author_association": "CONTRIBUTOR",
+            "created_at": "2026-06-01T00:00:00Z",
+            "updated_at": "2026-06-02T00:00:00Z",
+            "html_url": "https://github.com/o/r/pull/99",
+            "state": "open",
+            "draft": False,
+            "labels": [{"name": "bug", "color": "d73a4a"}],
+        }
+        files = [
+            triage.normalize_file(
+                {
+                    "filename": "src/app.py",
+                    "status": "modified",
+                    "additions": 12,
+                    "deletions": 3,
+                    "changes": 15,
+                    "patch": "@@\n-old\n+new",
+                }
+            )
+        ]
+        reviews = [{"author": "maintainer", "state": "APPROVED", "submittedAt": "2026-06-02T00:00:00Z"}]
+
+        pr = triage.normalize_rest_pr(raw, files, reviews)
+
+        self.assertEqual(pr["author"]["login"], "octo")
+        self.assertEqual(pr["author"]["association"], "CONTRIBUTOR")
+        self.assertEqual(pr["additions"], 12)
+        self.assertEqual(pr["deletions"], 3)
+        self.assertEqual(pr["reviewDecision"], "APPROVED")
+
+    def test_contributor_trust_uses_rest_commit_contributions(self):
+        pr = {
+            "title": "Improve docs",
+            "body": "Adds detailed setup guidance for local development and validation workflows.",
+            "additions": 20,
+            "deletions": 2,
+            "changedFiles": 1,
+            "checks": [],
+            "reviews": [],
+            "files": [{"filename": "docs/setup.md", "patch": "@@\n+more detail"}],
+            "contributor": {
+                "accountAssociation": "NONE",
+                "priorMergedPrs": 0,
+                "priorClosedUnmergedPrs": 0,
+                "repoCommitContributions": 120,
+                "currentOpenPrs": 1,
+                "currentOpenPrsInScan": 1,
+            },
+        }
+        pr["signals"] = triage.compute_pr_signals(pr)
+        pr["flags"] = triage.compute_pr_flags(pr)
+
+        trust = triage.compute_contributor_trust(pr)
+
+        self.assertGreaterEqual(trust["score"], 50)
+        self.assertTrue(any("repo commit contributions" in reason for reason in trust["positives"]))
+
+    def test_iso_date_filter(self):
+        self.assertTrue(triage.iso_date_at_or_after("2026-06-14T05:19:09Z", "2026-06-01"))
+        self.assertFalse(triage.iso_date_at_or_after("2026-05-14T05:19:09Z", "2026-06-01"))
+
+    def test_run_gh_json_rejects_empty_success(self):
+        completed = CompletedProcess(args=["gh"], returncode=0, stdout="", stderr="")
+        with patch("triage.subprocess.run", return_value=completed):
+            with self.assertRaises(triage.TriageError):
+                triage.run_gh_json(["gh", "api", "repos/o/r/pulls"])
 
     def test_contributor_trust_penalizes_risky_low_context_change(self):
         pr = {

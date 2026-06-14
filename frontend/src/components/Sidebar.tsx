@@ -1,6 +1,4 @@
-import { Activity, GitPullRequest, LayoutDashboard, ShieldAlert, Waves } from 'lucide-react'
-
-export type PageKey = 'overview' | 'queue' | 'flood' | 'signals'
+export type PageKey = 'overview' | 'queue' | 'flood'
 
 interface Props {
   active: PageKey
@@ -8,7 +6,6 @@ interface Props {
   counts: {
     prs: number
     flood: number
-    flags: number
   }
 }
 
@@ -16,19 +13,16 @@ const ITEMS: Array<{
   key: PageKey
   label: string
   description: string
-  icon: React.ElementType
 }> = [
-  { key: 'overview', label: 'Overview', description: 'scan health', icon: LayoutDashboard },
-  { key: 'queue', label: 'Queue', description: 'PR worklist', icon: GitPullRequest },
-  { key: 'flood', label: 'AI Flood', description: 'burst waves', icon: Waves },
-  { key: 'signals', label: 'Signals', description: 'flags and files', icon: Activity },
+  { key: 'overview', label: 'Overview', description: 'scan health' },
+  { key: 'queue', label: 'Queue', description: 'PR worklist' },
+  { key: 'flood', label: 'AI Flood', description: 'burst waves' },
 ]
 
 export function Sidebar({ active, onChange, counts }: Props) {
   const badgeFor = (key: PageKey) => {
     if (key === 'queue') return counts.prs
     if (key === 'flood') return counts.flood
-    if (key === 'signals') return counts.flags
     return null
   }
 
@@ -36,7 +30,6 @@ export function Sidebar({ active, onChange, counts }: Props) {
     <aside className="surface-soft shrink-0 rounded-lg p-2 xl:w-60">
       <nav className="grid grid-cols-2 gap-1 xl:grid-cols-1">
         {ITEMS.map((item) => {
-          const Icon = item.icon
           const badge = badgeFor(item.key)
           const selected = active === item.key
           return (
@@ -49,7 +42,6 @@ export function Sidebar({ active, onChange, counts }: Props) {
                   : 'border-transparent text-zinc-500 hover:bg-zinc-900/35 hover:text-zinc-200'
               }`}
             >
-              <Icon size={16} className={selected ? 'text-zinc-100' : 'text-zinc-500'} />
               <span className="min-w-0 flex-1">
                 <span className="block text-sm font-medium">{item.label}</span>
                 <span className="hidden text-xs text-zinc-600 xl:block">{item.description}</span>
@@ -63,14 +55,6 @@ export function Sidebar({ active, onChange, counts }: Props) {
           )
         })}
       </nav>
-
-      <div className="mt-2 hidden rounded-md border border-zinc-800/70 bg-black/20 p-3 text-xs leading-5 text-zinc-500 xl:block">
-        <div className="mb-1 flex items-center gap-2 text-zinc-400">
-          <ShieldAlert size={13} />
-          Maintainer-safe
-        </div>
-        Read-only cache views. No labels, comments, or closes are performed.
-      </div>
     </aside>
   )
 }

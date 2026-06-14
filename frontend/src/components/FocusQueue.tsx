@@ -1,4 +1,3 @@
-import { AlertTriangle, GitPullRequest, ShieldAlert } from 'lucide-react'
 import type { PullRequest } from '../types'
 import { formatFlag, trustColor } from '../utils'
 
@@ -33,9 +32,7 @@ export function FocusQueue({ prs, onSelect }: Props) {
           <h3 className="text-sm font-semibold text-white">Focus queue</h3>
           <p className="mt-1 text-xs text-zinc-500">Highest-risk cached PRs</p>
         </div>
-        <div className="flex h-8 w-8 items-center justify-center rounded-md border border-zinc-800 bg-zinc-900/35 text-zinc-400">
-          <ShieldAlert size={15} />
-        </div>
+        <div className="text-xs text-zinc-500">{queue.length}</div>
       </div>
 
       {queue.length === 0 ? (
@@ -53,7 +50,6 @@ export function FocusQueue({ prs, onSelect }: Props) {
               <div className="mb-2 flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="mb-1 flex items-center gap-2 text-[11px] text-zinc-500">
-                    <GitPullRequest size={12} />
                     <span className="font-mono">#{pr.number}</span>
                     <span>{pr.author.login}</span>
                   </div>
@@ -85,10 +81,7 @@ export function FocusQueue({ prs, onSelect }: Props) {
                   )}
                 </div>
               ) : (
-                <div className="flex items-center gap-1.5 text-[11px] text-zinc-500">
-                  <AlertTriangle size={11} />
-                  No human review yet
-                </div>
+                <div className="text-[11px] text-zinc-500">No human review yet</div>
               )}
             </button>
           ))}

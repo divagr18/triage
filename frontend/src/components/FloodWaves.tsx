@@ -1,4 +1,3 @@
-import { Waves } from 'lucide-react'
 import type { FloodWave, PullRequest } from '../types'
 import { formatNumber } from '../utils'
 
@@ -21,9 +20,7 @@ export function FloodWaves({ waves, prs, onSelect, limit = 5, pageMode = false }
           <h3 className="text-sm font-semibold text-white">AI flood waves</h3>
           <p className="mt-1 text-xs text-zinc-500">Cache-derived burst patterns</p>
         </div>
-        <div className="flex h-8 w-8 items-center justify-center rounded-md border border-zinc-800 bg-zinc-900/35 text-zinc-400">
-          <Waves size={15} />
-        </div>
+        <div className="text-xs text-zinc-500">{shown.length}</div>
       </div>
 
       {shown.length === 0 ? (

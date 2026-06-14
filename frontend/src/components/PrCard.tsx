@@ -1,4 +1,3 @@
-import { CheckCircle2, FileCode2, GitCommitHorizontal, MessageSquareWarning, ShieldAlert } from 'lucide-react'
 import type { PullRequest } from '../types'
 import { ciColor, formatDate, formatFlag, reviewColor, trustColor } from '../utils'
 
@@ -36,25 +35,15 @@ export function PrCard({ pr, selected, onClick }: Props) {
             {pr.title}
           </h4>
           <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-zinc-400">
-            <span className="flex items-center gap-1">
-              <GitCommitHorizontal size={12} />
-              {pr.author.login}
-            </span>
-            <span className="flex items-center gap-1">
-              <FileCode2 size={12} />
-              {pr.changedFiles} files
-            </span>
-            <span className="flex items-center gap-1 text-emerald-300">+{pr.additions}</span>
-            <span className="flex items-center gap-1 text-red-300">-{pr.deletions}</span>
+            <span>{pr.author.login}</span>
+            <span>{pr.changedFiles} files</span>
+            <span className="text-emerald-300">+{pr.additions}</span>
+            <span className="text-red-300">-{pr.deletions}</span>
             {signals.ciState !== 'none' && (
-              <span className={`flex items-center gap-1 ${ciColor(signals.ciState)}`}>
-                <CheckCircle2 size={12} />
-                {signals.ciState}
-              </span>
+              <span className={ciColor(signals.ciState)}>{signals.ciState}</span>
             )}
             {signals.reviewState !== 'none' && (
-              <span className={`flex items-center gap-1 ${reviewColor(signals.reviewState)}`}>
-                <MessageSquareWarning size={12} />
+              <span className={reviewColor(signals.reviewState)}>
                 {signals.reviewState.replace(/_/g, ' ')}
               </span>
             )}
@@ -70,8 +59,7 @@ export function PrCard({ pr, selected, onClick }: Props) {
           </span>
           {pr.flags.length > 0 && (
             <span className="flex items-center gap-1 text-xs font-medium text-zinc-400">
-              <ShieldAlert size={12} />
-              {pr.flags.length}
+              {pr.flags.length} flags
             </span>
           )}
         </div>

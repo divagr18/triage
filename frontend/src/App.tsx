@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Database, GitPullRequest, Loader2, TerminalSquare } from 'lucide-react'
+import { Database, Loader2 } from 'lucide-react'
 import { Header } from './components/Header'
 import { Metrics } from './components/Metrics'
 import { FileBucketsChart } from './components/FileBucketsChart'
@@ -45,10 +45,7 @@ function ScanHeader({ data }: { data: TriageCache }) {
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
-            <span className="inline-flex items-center gap-1.5 rounded-md border border-zinc-800/70 bg-black/20 px-2 py-0.5">
-              <GitPullRequest size={12} />
-              {data.state}
-            </span>
+            <span className="rounded-md border border-zinc-800/70 bg-black/20 px-2 py-0.5">{data.state}</span>
             <span className="rounded-md border border-zinc-800/70 bg-black/20 px-2 py-0.5">
               schema v{data.schemaVersion}
             </span>
@@ -89,7 +86,6 @@ function CommandStrip({ data }: { data: TriageCache }) {
 
   return (
     <div className="surface-soft flex min-w-0 items-center gap-3 rounded-lg px-4 py-2.5 text-xs text-zinc-500">
-      <TerminalSquare size={15} className="shrink-0 text-zinc-400" />
       <code className="min-w-0 truncate font-mono text-zinc-300">{command}</code>
     </div>
   )
@@ -141,7 +137,6 @@ export default function App() {
                 counts={{
                   prs: data.prs.length,
                   flood: floodWaves.length,
-                  flags: Object.keys(data.signalSummary.flagCounts).length,
                 }}
               />
 
@@ -155,6 +150,18 @@ export default function App() {
                       <FocusQueue prs={data.prs} onSelect={selectPr} />
                       <FloodWaves waves={floodWaves} prs={data.prs} onSelect={selectPr} limit={3} />
                     </div>
+                    <section>
+                      <div className="mb-4">
+                        <h2 className="text-lg font-semibold tracking-tight text-zinc-50">Signals</h2>
+                        <p className="mt-1 text-sm text-zinc-400">
+                          File mix and deterministic flags for the current scan.
+                        </p>
+                      </div>
+                      <div className="grid gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+                        <FileBucketsChart summary={data.signalSummary} />
+                        <FlagsList summary={data.signalSummary} />
+                      </div>
+                    </section>
                   </div>
                 )}
 
@@ -190,18 +197,6 @@ export default function App() {
                   </>
                 )}
 
-                {page === 'signals' && (
-                  <>
-                    <PageHeader
-                      title="Signals"
-                      description="Deterministic flags and file-category distribution for the current cache."
-                    />
-                    <div className="grid gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
-                      <FileBucketsChart summary={data.signalSummary} />
-                      <FlagsList summary={data.signalSummary} />
-                    </div>
-                  </>
-                )}
               </section>
             </div>
           </div>
